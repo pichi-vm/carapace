@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs of the same ref when a new commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fixture builder dependencies
+        # The fixture builder is a shell pipeline (no production-crate
+        # code on the producer side — true differential test). It needs:
+        #   - cryptsetup-bin (veritysetup format)
+        #   - gdisk          (sgdisk for GPT writes)
+        #   - dmsetup        (devicemapper userspace, for the writable-
+        #                     snapshot dogfood that produces a real CoW)
+        #   - e2fsprogs      (mkfs.ext4 inside the dogfooded snapshot)
+        # mount/umount and python3 are present on every ubuntu runner.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cryptsetup-bin gdisk dmsetup e2fsprogs
+
+      - name: Install Rust toolchain
+        # rust-toolchain.toml in the repo root is the source of truth
+        # (pins channel + profile + components). The action just needs
+        # *some* toolchain to bootstrap rustup; `stable` satisfies its
+        # required `toolchain` input. Subsequent cargo invocations defer
+        # to rust-toolchain.toml — rustup auto-fetches the pinned
+        # version on first use.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo build
+        run: cargo build --all-targets --locked
+
+      - name: cargo test (unit)
+        # All unit tests live in `#[cfg(test)] mod tests { ... }` blocks
+        # inside the bin crate (carapace has no library target). `--bins`
+        # builds and runs every bin's unit-test target — currently the
+        # one `carapace` bin.
+        run: cargo test --bins --no-fail-fast --locked
+
+      - name: Root-required integration tests
+        # `sudo -E` does NOT preserve PATH on Ubuntu (secure_path in sudoers
+        # strips it). Re-inject PATH so cargo (in ~/.cargo/bin from
+        # the toolchain install) is found.
+        run: |
+          sudo -E env "PATH=$PATH" cargo test --tests --no-fail-fast --locked -- --test-threads=1
+
+      - name: Unsafe boundary gate
+        run: bash ci/grep-unsafe.sh
+
+  audit:
+    # Runs in parallel with build-test. Fails on any RUSTSEC advisory.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: cargo audit
+        run: cargo audit --deny warnings

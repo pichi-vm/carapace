@@ -1,0 +1,9 @@
+[toolchain]
+# Effective MSRV is 1.85 — required by transitive dep (`getrandom`
+# 0.4.2 via `serial_test`) which uses `edition = "2024"`. Bumps from
+# the carapace-side floor of 1.83 (`ErrorKind::ResourceBusy`
+# stabilization). Pin to a known-good stable so CI builds and
+# contributor lints are reproducible.
+channel = "1.85"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

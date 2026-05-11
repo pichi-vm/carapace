@@ -1,0 +1,31 @@
+[package]
+name = "carapace"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Assembler for carapace block-device chains (read-side only)"
+repository = "https://github.com/ShelbyADillo/carapace"
+
+[[bin]]
+name = "carapace"
+path = "src/main.rs"
+
+[dependencies]
+iocuddle = "0.2"
+thiserror = "2"
+zerocopy = { version = "0.8", features = ["derive"] }
+
+[dev-dependencies]
+# default-features = false drops `async` (which pulls in futures + parking_lot
+# + scc and ~12 transitive crates). carapace's tests use only the synchronous
+# `#[serial]` macro; `async` features are unused.
+serial_test = { version = "3", default-features = false }
+tempfile = "3"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"   # initrd binary; size matters more than execution speed
+                  # at 200 ms total cold-start (lane 05: -119 KiB / -17.9%)
