@@ -60,6 +60,34 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Rust idiom
+
+- **Methods over free functions.** Free functions are almost always wrong;
+  never use them without justification. Extension traits when you don't own
+  the type.
+- **Use std/core traits idiomatically.** `From` / `TryFrom` for
+  conversions, `AsRef` for cheap views, `Iterator` for sequences. Reach
+  for the trait before writing a method.
+- **Encode logic in types.** A good Rust program is mostly transitions
+  across types, not a pile of function logic.
+- **Errors mirror caller branches.** Variants exist when a caller would
+  decide differently. Group + nest (`enum E { Malformed(M), Io(I) }`) when
+  the outer is the branch point and the inner carries the specific kind up
+  for context.
+- **Typed wire layouts.** `#[repr(C[,packed])]` / `#[repr(uN)]` at binary
+  boundaries so the type IS the format. Pin offsets via `const _: () =
+  assert!(...)`.
+- **Minimal public API.** Pub only what callers use.
+- **Public fields when shape is known** (wire layouts) or when types
+  enforce validity (enums). Don't reflexively encapsulate.
+- **Write twice.** A complete first pass is context for a much better
+  second pass. Don't ship the first.
+- **When editing, replace non-conforming code.** Existing code in a file
+  you touch that violates these rules: rewrite it.
+- **Always `cargo fmt`.** Run before declaring a task done. Don't ship
+  hand-formatted code.
+- **Documented enum variants: blank line above** (except the first).
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
