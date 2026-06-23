@@ -1,0 +1,25 @@
+[package]
+name = "carapace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+description = "Assemble carapace block-device chains (read) and import raw images into carapace OCI artifacts (produce)."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "carapace"
+path = "src/main.rs"
+
+[dependencies]
+carapace-dm = { workspace = true }
+carapace-import = { workspace = true }
+thiserror = { workspace = true }
+zerocopy = { workspace = true }
+
+[dev-dependencies]
+serial_test = { version = "3", default-features = false }
+tempfile = { workspace = true }

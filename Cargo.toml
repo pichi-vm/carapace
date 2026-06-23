@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["carapace", "carapace-dm", "carapace-import"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/pichi-vm/carapace"
+
+# Only genuinely-shared deps (>=2 members) live here; single-consumer deps are
+# declared inline in the crate that uses them (e.g. the serde/anyhow/sha2/hex
+# producer deps live in carapace-import).
+[workspace.dependencies]
+carapace-dm = { path = "carapace-dm" }
+carapace-import = { path = "carapace-import" }
+thiserror = "2"
+zerocopy = { version = "0.8", features = ["derive"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+type_complexity = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+needless_continue = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+too_many_lines = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+uninlined_format_args = "allow"
+
+# carapace ships in a guest initrd where binary size matters.
+[profile.release.package.carapace]
+opt-level = "z"
+codegen-units = 1
+strip = true

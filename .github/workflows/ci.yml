@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  license-headers:
+    name: license headers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: korandoru/hawkeye@v6
+
+  commit-messages:
+    name: commit messages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: pipx run gitlint --commits "origin/${{ github.base_ref || 'main' }}..HEAD"
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  lint:
+    name: fmt + clippy + unsafe-gate
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features
+      # Authoritative no-unsafe enforcement (carapace allows `unsafe` only in
+      # carapace-dm/src/uapi.rs; this grep gate is the source of truth).
+      - run: bash carapace/ci/grep-unsafe.sh
+
+  test:
+    name: unit + integration (root)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install integration test deps
+        run: sudo apt-get update && sudo apt-get install -y cryptsetup-bin gdisk dmsetup e2fsprogs python3
+      - name: Unit tests
+        run: cargo test --bins
+      # Integration tests build a real layered ext4 carapace and need root
+      # (loop devices, device-mapper). Run as root with the runner user's
+      # cargo/rustup env so the toolchain resolves under sudo.
+      - name: Integration tests (root)
+        run: |
+          sudo env "PATH=$PATH" "HOME=$HOME" \
+            "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
+            "RUSTFLAGS=-D warnings" \
+            cargo test --tests -- --test-threads=1
