@@ -115,6 +115,12 @@ impl DmHeader {
         self.inner.target_count = count;
     }
 
+    /// Kernel-returned number of targets in the reply (used by
+    /// `DM_TABLE_STATUS`). Zero means the device has no live table.
+    pub(super) fn target_count(&self) -> u32 {
+        self.inner.target_count
+    }
+
     /// Kernel-returned offset (from start of buffer) where the
     /// variable-length payload begins. For `DM_LIST_DEVICES`, this is
     /// where the first `dm_name_list` entry sits.

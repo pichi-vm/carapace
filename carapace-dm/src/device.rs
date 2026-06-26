@@ -12,7 +12,7 @@ use super::header::DmHeader;
 use super::table::{DmTable, DmTableBuf};
 use super::uapi::{
     DM_BUFFER_FULL_FLAG, DM_DEV_CREATE, DM_DEV_REMOVE, DM_DEV_SUSPEND, DM_IOCTL_VERSION_MAJOR,
-    DM_LIST_DEVICES, DM_TABLE_LOAD,
+    DM_LIST_DEVICES, DM_TABLE_LOAD, DM_TABLE_STATUS, DM_TARGET_SPEC_SIZE,
 };
 use crate::DmError;
 use std::fs::{File, OpenOptions};
@@ -188,6 +188,79 @@ impl DmDevice {
             })?;
         check_version(&header, "DM_DEV_RESUME")?;
         Ok(())
+    }
+
+    /// dm-snapshot COW usage from `DM_TABLE_STATUS`. Returns
+    /// `(allocated_sectors, total_sectors)` in 512-byte sectors, parsed
+    /// from the snapshot status line `"<allocated>/<total> <metadata>"`.
+    /// Errors if the device is not a (valid) snapshot or status is
+    /// `"Invalid"` / `"Overflow"`.
+    ///
+    /// conglobate uses this to read back ONLY the allocated extent of a
+    /// large sparse loop-backed COW exception store, rather than copying
+    /// the whole (mostly-unwritten) device.
+    ///
+    /// `DM_TABLE_STATUS` mirrors `DM_TABLE_LOAD`'s buffer shape but in
+    /// the read direction: the kernel fills a trailing variable-length
+    /// region after the `dm_ioctl` header with, per target, a
+    /// `dm_target_spec` followed by a NUL-terminated status string. We
+    /// size the buffer generously and re-issue with a larger one if the
+    /// kernel sets `DM_BUFFER_FULL_FLAG` (same retry discipline as
+    /// `list_devices_with_prefix`).
+    pub fn snapshot_allocated(&self, control: &mut File) -> Result<(u64, u64), DmError> {
+        /// Initial trailing-buffer size. A snapshot status line is a few
+        /// dozen bytes (spec + "alloc/total meta"); 4 KiB is ample, and
+        /// the retry below covers any pathological case.
+        const INITIAL_CAP: usize = 4 * 1024;
+        /// Hard ceiling on the retry growth — a single snapshot target's
+        /// status can never approach this; the cap guards a misbehaving
+        /// kernel from driving an unbounded allocation.
+        const MAX_CAP: usize = 256 * 1024;
+
+        let mut cap = INITIAL_CAP;
+        loop {
+            let total = DmHeader::SIZE + cap;
+            let mut bytes = vec![0u8; total];
+
+            let mut header = DmHeader::new(&self.name)?;
+            header.set_data_size(total as u32);
+            bytes[..DmHeader::SIZE].copy_from_slice(header.as_bytes());
+
+            let header_mut = DmHeader::mut_from_prefix(&mut bytes)
+                .expect("DmHeader::SIZE bytes were just written")
+                .0;
+
+            DM_TABLE_STATUS
+                .ioctl(control, header_mut)
+                .map_err(|source| DmError::DmIoctl {
+                    op: "DM_TABLE_STATUS",
+                    source,
+                    table_line: None,
+                })?;
+            check_version(header_mut, "DM_TABLE_STATUS")?;
+
+            // Buffer too small: grow and retry, like list_devices.
+            if header_mut.flags() & DM_BUFFER_FULL_FLAG != 0 {
+                if cap >= MAX_CAP {
+                    return Err(DmError::DmIoctl {
+                        op: "DM_TABLE_STATUS",
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::OutOfMemory,
+                            format!("snapshot status exceeded {MAX_CAP}-byte buffer"),
+                        ),
+                        table_line: None,
+                    });
+                }
+                cap = (cap * 2).min(MAX_CAP);
+                continue;
+            }
+
+            let target_count = header_mut.target_count();
+            let data_start = header_mut.data_start() as usize;
+            let data_end = (header_mut.data_size() as usize).min(bytes.len());
+
+            return parse_snapshot_status(&bytes, target_count, data_start, data_end);
+        }
     }
 
     /// Opt out of `Drop = DM_DEV_REMOVE`.
@@ -386,6 +459,85 @@ fn check_version(header: &DmHeader, op: &'static str) -> Result<(), DmError> {
     Ok(())
 }
 
+/// Extract the first target's status string from a `DM_TABLE_STATUS`
+/// reply buffer and parse it as a dm-snapshot status line.
+///
+/// The trailing payload, starting at `data_start`, is a sequence of
+/// `dm_target_spec` (40 bytes) each followed by a NUL-terminated status
+/// string. We only need the first target. `target_count == 0` means the
+/// device has no live table (never activated / wrong device).
+fn parse_snapshot_status(
+    bytes: &[u8],
+    target_count: u32,
+    data_start: usize,
+    data_end: usize,
+) -> Result<(u64, u64), DmError> {
+    if target_count == 0 {
+        return Err(DmError::Usage(
+            "DM_TABLE_STATUS returned no targets (device has no live table)".into(),
+        ));
+    }
+
+    // The status string begins just past the first target's fixed
+    // dm_target_spec record.
+    let str_start = data_start
+        .checked_add(DM_TARGET_SPEC_SIZE)
+        .filter(|&s| s <= data_end)
+        .ok_or_else(|| {
+            DmError::Usage("DM_TABLE_STATUS reply truncated before status string".into())
+        })?;
+
+    let str_end = bytes[str_start..data_end]
+        .iter()
+        .position(|&b| b == 0)
+        .map_or(data_end, |n| str_start + n);
+
+    let status = std::str::from_utf8(&bytes[str_start..str_end])
+        .map_err(|_| DmError::Usage("DM_TABLE_STATUS status string is not UTF-8".into()))?;
+
+    parse_snapshot_status_line(status)
+}
+
+/// Parse a dm-snapshot status line — `"<allocated>/<total> <metadata>"`
+/// — into `(allocated_sectors, total_sectors)` (512-byte sectors). The
+/// kernel reports `"Invalid"` for a broken snapshot and `"Overflow"`
+/// when the COW store is full; both are surfaced as errors.
+fn parse_snapshot_status_line(status: &str) -> Result<(u64, u64), DmError> {
+    let trimmed = status.trim();
+    if trimmed == "Invalid" || trimmed == "Overflow" {
+        return Err(DmError::Usage(format!(
+            "dm-snapshot status is '{trimmed}' (snapshot is not usable)"
+        )));
+    }
+
+    // First whitespace-separated token is "allocated/total"; the rest is
+    // the metadata-sectors token we don't need.
+    let usage = trimmed
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| DmError::Usage(format!("dm-snapshot status line is empty: {status:?}")))?;
+
+    let (alloc, total) = usage.split_once('/').ok_or_else(|| {
+        DmError::Usage(format!(
+            "dm-snapshot status token {usage:?} is not '<allocated>/<total>' \
+             (device may not be a snapshot)"
+        ))
+    })?;
+
+    let allocated = alloc.parse::<u64>().map_err(|_| {
+        DmError::Usage(format!(
+            "dm-snapshot allocated sectors not an integer: {alloc:?}"
+        ))
+    })?;
+    let total = total.parse::<u64>().map_err(|_| {
+        DmError::Usage(format!(
+            "dm-snapshot total sectors not an integer: {total:?}"
+        ))
+    })?;
+
+    Ok((allocated, total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +550,56 @@ mod tests {
         let (m, n) = split_dev(dev as u64);
         assert_eq!(m, major_in);
         assert_eq!(n, minor_in);
+    }
+
+    #[test]
+    fn parse_snapshot_status_line_extracts_allocated_total() {
+        // Canonical snapshot status: "<allocated>/<total> <metadata>".
+        assert_eq!(
+            parse_snapshot_status_line("16/40960 8").unwrap(),
+            (16, 40960)
+        );
+    }
+
+    #[test]
+    fn parse_snapshot_status_line_ignores_trailing_metadata() {
+        // Only the first token matters; metadata sectors are ignored.
+        assert_eq!(
+            parse_snapshot_status_line("1024/2097152 256").unwrap(),
+            (1024, 2_097_152)
+        );
+    }
+
+    #[test]
+    fn parse_snapshot_status_line_rejects_invalid() {
+        assert!(matches!(
+            parse_snapshot_status_line("Invalid"),
+            Err(DmError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn parse_snapshot_status_line_rejects_overflow() {
+        assert!(matches!(
+            parse_snapshot_status_line("Overflow"),
+            Err(DmError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn parse_snapshot_status_line_rejects_non_snapshot() {
+        // A non-snapshot target (e.g. "linear") has no "<a>/<b>" token.
+        assert!(matches!(
+            parse_snapshot_status_line("0 2048 linear"),
+            Err(DmError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn parse_snapshot_status_zero_targets_errors() {
+        assert!(matches!(
+            parse_snapshot_status(&[0u8; 64], 0, 0, 64),
+            Err(DmError::Usage(_))
+        ));
     }
 }

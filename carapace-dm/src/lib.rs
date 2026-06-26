@@ -12,6 +12,9 @@
 //!   `DmTableBuf` (kernel-ABI byte buffer for `DM_TABLE_LOAD`).
 //! * [`device`] — `DmDevice` RAII handle (create / load_table / resume /
 //!   drop=remove) + `remove_by_name` + `list_devices_with_prefix`.
+//! * [`loopdev`] — `LoopDevice`: attach a (tmpfs-backed) file to a free
+//!   `/dev/loopN` for use as a dm-snapshot COW exception store. Safe
+//!   code over the loop ioctls declared in `uapi`.
 //!
 //! This crate is **chain-agnostic**: it knows kernel ABI, dm-table
 //! rendering, and per-device RAII. It does NOT know what a "scute" is —
@@ -33,12 +36,14 @@
 
 mod device;
 mod header;
+mod loopdev;
 mod table;
 mod uapi;
 
 pub use device::{
     list_devices_with_prefix, open_dm_control, remove_by_name, DmCreateMode, DmDevice,
 };
+pub use loopdev::LoopDevice;
 pub use table::{DmTable, TableLine, TargetSpec};
 
 use thiserror::Error;
