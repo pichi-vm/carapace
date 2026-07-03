@@ -14,9 +14,9 @@
 //! lives here.
 
 use crate::chain::ValidatedChain;
+use crate::dm::{open_dm_control, DmCreateMode, DmDevice, DmTable, TableLine, TargetSpec};
 use crate::snapshot::{ValidatedSnapshotHeader, SNAPSHOT_HEADER_SIZE};
 use crate::CarapaceError;
-use carapace_dm::{open_dm_control, DmCreateMode, DmDevice, DmTable, TableLine, TargetSpec};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};

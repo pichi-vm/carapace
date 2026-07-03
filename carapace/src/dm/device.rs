@@ -14,7 +14,7 @@ use super::uapi::{
     DM_BUFFER_FULL_FLAG, DM_DEV_CREATE, DM_DEV_REMOVE, DM_DEV_SUSPEND, DM_IOCTL_VERSION_MAJOR,
     DM_LIST_DEVICES, DM_TABLE_LOAD, DM_TABLE_STATUS, DM_TARGET_SPEC_SIZE,
 };
-use crate::DmError;
+use crate::dm::DmError;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use zerocopy::{FromBytes, IntoBytes};

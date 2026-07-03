@@ -3,7 +3,7 @@
 
 //! `detach` — best-effort tear down of a previously-attached chain.
 
-use carapace_dm::{list_devices_with_prefix, remove_by_name, DmError};
+use crate::dm::{list_devices_with_prefix, remove_by_name, DmError};
 
 use crate::name::validate_dm_name;
 use crate::CarapaceError;

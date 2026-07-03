@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["carapace", "carapace-dm", "carapace-import"]
+members = ["carapace"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,12 +9,9 @@ license = "Apache-2.0"
 publish = false
 repository = "https://github.com/pichi-vm/carapace"
 
-# Only genuinely-shared deps (>=2 members) live here; single-consumer deps are
-# declared inline in the crate that uses them (e.g. the serde/anyhow/sha2/hex
-# producer deps live in carapace-import).
+# Single-crate workspace (carapace); these shared entries feed the crate's
+# `{ workspace = true }` deps.
 [workspace.dependencies]
-carapace-dm = { path = "carapace-dm" }
-carapace-import = { path = "carapace-import" }
 thiserror = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
 tempfile = "3"

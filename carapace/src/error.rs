@@ -67,9 +67,9 @@ pub enum CarapaceError {
 /// Map the device-mapper layer's operational errors into the crate's
 /// richer error type. `carapace-dm` is chain-agnostic, so all of its
 /// variants are operational (never adversary-rejections).
-impl From<carapace_dm::DmError> for CarapaceError {
-    fn from(e: carapace_dm::DmError) -> Self {
-        use carapace_dm::DmError;
+impl From<crate::dm::DmError> for CarapaceError {
+    fn from(e: crate::dm::DmError) -> Self {
+        use crate::dm::DmError;
         match e {
             DmError::Usage(s) => CarapaceError::Usage(s),
             DmError::Io(e) => CarapaceError::Io(e),

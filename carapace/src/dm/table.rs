@@ -12,7 +12,7 @@
 
 use super::header::DmHeader;
 use super::uapi::{dm_target_spec_raw, DM_MAX_TYPE_NAME};
-use crate::DmError;
+use crate::dm::DmError;
 use zerocopy::{FromBytes, IntoBytes};
 
 /// Write bytes as lowercase hex into any `fmt::Write`. Lets the dm-table

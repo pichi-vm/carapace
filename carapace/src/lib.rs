@@ -31,6 +31,11 @@ mod assemble;
 mod attach;
 mod chain;
 mod detach;
+// Vendored device-mapper ioctl layer (formerly the carapace-dm crate). Its
+// `uapi` submodule carries the only unsafe. `LoopDevice` + the loop-device
+// uapi are build-side only (unused by this read path), hence the allows.
+#[allow(dead_code, unreachable_pub)]
+mod dm;
 mod error;
 mod name;
 mod partition;

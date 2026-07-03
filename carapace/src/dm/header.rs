@@ -9,7 +9,7 @@
 //! `version = [4, 0, 0]`, `data_size = SIZE` for fixed-payload calls).
 
 use super::uapi::{dm_flags, dm_ioctl_raw, DM_IOCTL_VERSION_MAJOR, DM_NAME_LEN, DM_UUID_LEN};
-use crate::DmError;
+use crate::dm::DmError;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Safe wrapper over `dm_ioctl`. Hides the UAPI; only construction +

@@ -16,25 +16,17 @@ use carapace::{validate_dm_name, CarapaceError};
 use std::process::ExitCode;
 
 const HELP: &str = "\
-carapace — assemble (read) and produce (import) carapace block-device chains.
+carapace — assemble (read) carapace block-device chains.
 
 USAGE:
     carapace attach --name <NAME> --root <HEX>
     carapace detach --name <NAME>
-    carapace import --image <RAW> --out <DIR> --tag <REF>
     carapace --help
     carapace --version
 
 FLAGS:
     -n, --name <NAME>    Operator-visible /dev/mapper/<NAME>
     -r, --root <HEX>     Trusted chain root, lowercase hex (\u{2265} 64 chars)
-    -i, --image <RAW>    Raw block image to import (import)
-    -o, --out <DIR>      Output OCI image-layout directory (import)
-    -t, --tag <REF>      Reference written as org.opencontainers.image.ref.name (import)
-
-import converts a raw image into a single-scute base carapace and writes it as
-an OCI image layout in <DIR>, pushable with `skopeo copy oci:<DIR>:<REF>
-docker://…`. Verity trees are not shipped — the consumer reconstructs them.
 
 attach walks the chain backward from --root, validates parameters
 against the RDP whitelist, builds the dm stack, and prints the
@@ -93,21 +85,6 @@ fn parse_and_dispatch(mut args: impl Iterator<Item = String>) -> Result<(), Cara
             }
             Ok(())
         }
-        "import" => {
-            let (image, out, tag) = parse_import(args)?;
-            // The producer path returns anyhow errors; print the chain and
-            // exit rather than forcing it through the read-side error enum.
-            match carapace_import::oci::import_raw(&image, &out, &tag, None) {
-                Ok(digest) => {
-                    println!("{digest}");
-                    Ok(())
-                }
-                Err(e) => {
-                    eprintln!("carapace import: {e:#}");
-                    std::process::exit(1);
-                }
-            }
-        }
         other => Err(CarapaceError::Usage(format!(
             "unknown verb {other:?} (expected `attach`, `detach`, `--help`, or `--version`)"
         ))),
@@ -159,36 +136,6 @@ fn parse_detach(args: impl Iterator<Item = String>) -> Result<String, CarapaceEr
     let name = name.ok_or_else(|| CarapaceError::Usage("detach: --name is required".into()))?;
     validate_dm_name(&name)?;
     Ok(name)
-}
-
-/// Parse `import --image <raw> --out <dir> --tag <ref>`.
-fn parse_import(
-    args: impl Iterator<Item = String>,
-) -> Result<(std::path::PathBuf, std::path::PathBuf, String), CarapaceError> {
-    let mut image: Option<String> = None;
-    let mut out: Option<String> = None;
-    let mut tag: Option<String> = None;
-    let mut iter = args.peekable();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-i" | "--image" => image = Some(value_for(&arg, iter.next())?),
-            "-o" | "--out" => out = Some(value_for(&arg, iter.next())?),
-            "-t" | "--tag" => tag = Some(value_for(&arg, iter.next())?),
-            "-h" | "--help" => {
-                print!("{HELP}");
-                std::process::exit(0);
-            }
-            other => {
-                return Err(CarapaceError::Usage(format!(
-                    "import: unexpected argument {other:?}"
-                )));
-            }
-        }
-    }
-    let image = image.ok_or_else(|| CarapaceError::Usage("import: --image is required".into()))?;
-    let out = out.ok_or_else(|| CarapaceError::Usage("import: --out is required".into()))?;
-    let tag = tag.ok_or_else(|| CarapaceError::Usage("import: --tag is required".into()))?;
-    Ok((image.into(), out.into(), tag))
 }
 
 fn value_for(flag: &str, value: Option<String>) -> Result<String, CarapaceError> {
