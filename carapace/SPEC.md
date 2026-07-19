@@ -374,6 +374,20 @@ The trust properties stated in [Threat Model](#threat-model) are preserved witho
 
 This is an implementation choice, not a requirement. The on-disk format the kernel consumes (see [On-Disk Format](#on-disk-format-normative)) is unchanged either way; only what crosses the wire between builder and consumer is at issue.
 
+### systemd Integration
+
+The GPT deployment pattern is deliberately shaped to compose with systemd's existing storage machinery, so a carapace root can boot on stock systemd with a single dedicated assembler and no changes to the rest of the boot path.
+
+**Command line.** The trust anchor is delivered as `carapacehash=<rootₙ₋₁-hex>`, parallel to systemd's `roothash=`/`usrhash=`, gated by `systemd.carapace=` / `rd.systemd.carapace=` (default on). The root mount contract is `root=/dev/mapper/root`: the assembler produces that device and everything above it is stock systemd.
+
+**A dedicated assembler, not `systemd-veritysetup`.** A carapace is a salt-chained *stack* of dm-snapshot(cow)+dm-verity scutes, not the single data+hash pair `systemd-veritysetup-generator` handles. Integration therefore takes the form of a peer generator (mirroring `systemd-veritysetup-generator`): it reads `carapacehash=` and emits a unit, ordered `Before=initrd-root-device.target`, that walks the chain and assembles `/dev/mapper/root`. `carapacehash=` deliberately does *not* reuse `roothash=`, so the two generators never contend for the same root.
+
+**PARTUUID discovery matches the DPS.** The [PARTUUID Assignment](#partuuid-assignment) rule — cow ← `root[0..16]`, verity ← `root[16..32]` — is the same encoding the Discoverable Partitions Specification uses for verity (data partition ← first 128 bits of the root hash, verity partition ← the last 128 bits). The scute type GUIDs ([Partition Types](#partition-types)) are carapace-defined; registering them with the DPS is the natural path to first-class recognition. They are intentionally arch-neutral: one carapace is one image, so arch-based root selection (the reason the DPS verity types are per-architecture) does not apply.
+
+**Filesystem vs. inner GPT is content-probed, not signalled.** Once `/dev/mapper/root` exists, what it contains is determined exactly as systemd already determines it for any root device (see `systemd-dissect`): a bare filesystem is mounted directly; a device carrying a GPT is dissected and its inner root/`usr`/… discovered by DPS type GUID (`systemd-gpt-auto`). No additional command-line signal is needed — `carapacehash=` conveys only the chain anchor; the inner shape is systemd's normal determination.
+
+**Integrity covers the whole assembled device.** Unlike systemd's outer `roothash=`, where verity protects the contents of a partition, a carapace's chain integrity-protects the *entire* assembled block device. An inner GPT's partitions therefore need not carry their own verity — `rootₙ₋₁` already covers everything inside `/dev/mapper/root`. This keeps the model a single trust anchor rather than nested verity domains.
+
 ## Design Rationale
 
 ### Trust versus discovery
