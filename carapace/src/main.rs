@@ -12,9 +12,18 @@
 #![cfg(target_os = "linux")]
 
 mod cli;
+mod generator;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // Multi-call dispatch: when invoked as the systemd generator (via the
+    // `systemd-carapace-generator` symlink dracut installs into
+    // `/usr/lib/systemd/system-generators/`), systemd passes three output
+    // directories and expects unit files written — not the normal CLI.
+    let arg0 = std::env::args().next().unwrap_or_default();
+    if generator::invoked_as_generator(&arg0) {
+        return generator::run();
+    }
     cli::run()
 }
