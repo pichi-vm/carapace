@@ -66,9 +66,10 @@ fn attach_mount_verify_detach(test_label: &str, n_scutes: usize) {
 
     let mapper = Carapace::attach(&name, &chain.trusted_root_hex);
     let mapper_str = mapper.to_string_lossy();
-    assert!(
-        mapper_str.starts_with("/dev/dm-"),
-        "attach should print the kernel-synchronous /dev/dm-<minor> path, got {mapper_str}"
+    assert_eq!(
+        mapper_str,
+        format!("/dev/mapper/{name}"),
+        "attach should print the operator-visible /dev/mapper/<name> path, got {mapper_str}"
     );
     assert!(
         mapper.exists(),
