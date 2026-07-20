@@ -89,6 +89,13 @@ impl DmHeader {
         self.inner.flags |= dm_flags::READONLY;
     }
 
+    /// Set the dm→udev cookie in `event_nr`. The kernel echoes it as
+    /// `DM_COOKIE=<value>` on the uevent this ioctl generates; udev's
+    /// `10-dm.rules` decodes the high-half flags (see `DmDevice::resume`).
+    pub(super) fn set_udev_cookie(&mut self, cookie: u32) {
+        self.inner.event_nr = cookie;
+    }
+
     /// Kernel-returned dev_t (synchronously populated by `DM_DEV_CREATE`).
     pub(super) fn dev(&self) -> u64 {
         self.inner.dev

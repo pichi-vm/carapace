@@ -36,6 +36,14 @@ pub enum DmCreateMode {
     ReadWrite,
 }
 
+/// dm→udev cookie for the operator-visible top alias: the
+/// `DM_UDEV_PRIMARY_SOURCE_FLAG` (0x0040) shifted into the cookie's
+/// high half (`DM_UDEV_FLAGS_SHIFT` == 16). Marks the resume as the
+/// authoritative activation so udev's DM rules create and keep
+/// `/dev/mapper/<name>` and its systemd `dev-mapper-<name>.device`
+/// alias, rather than skipping — or removing — them on coldplug.
+pub const DM_UDEV_PRIMARY_SOURCE_COOKIE: u32 = 0x0040 << 16;
+
 /// Decode Linux dev_t into (major, minor) per `<linux/kdev_t.h>`.
 ///
 /// Layout (32-bit dev_t in `dm_ioctl.dev`'s lower half — kernel zero-
@@ -173,12 +181,21 @@ impl DmDevice {
     /// DM_DEV_RESUME — toggle the device from "loaded" to "active",
     /// publishing the loaded table. Read-side activation never has
     /// reason to re-suspend the device, so no public `suspend` exists.
-    pub fn resume(&self, control: &mut File) -> Result<(), DmError> {
+    ///
+    /// `udev_cookie` is carried in `event_nr`; the kernel echoes it as
+    /// `DM_COOKIE=` on the "change" uevent this resume generates. Pass
+    /// [`DM_UDEV_PRIMARY_SOURCE_COOKIE`] on the operator-visible top
+    /// alias so udev's DM rules run in full (creating the
+    /// `/dev/mapper/<name>` symlink and its systemd `.device` alias, and
+    /// — critically — not tearing them down on a later coldplug). Pass
+    /// `0` on the internal layers, which need no `/dev/mapper` entry.
+    pub fn resume(&self, control: &mut File, udev_cookie: u32) -> Result<(), DmError> {
         let mut header = DmHeader::new(&self.name)?;
         if matches!(self.mode, DmCreateMode::ReadOnly) {
             header.add_readonly();
         }
         header.set_suspend(false);
+        header.set_udev_cookie(udev_cookie);
         DM_DEV_SUSPEND
             .ioctl(control, &mut header)
             .map_err(|source| DmError::DmIoctl {

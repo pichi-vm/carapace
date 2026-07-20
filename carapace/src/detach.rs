@@ -37,6 +37,12 @@ pub fn detach(name: &str) -> Result<Vec<String>, CarapaceError> {
     for dev in &ordered {
         let _ = remove_by_name_tolerant(dev, &mut errors);
     }
+
+    // Best-effort removal of the operator-visible `/dev/mapper/<name>`
+    // symlink that attach created itself (udev never owned it). A stale
+    // link left behind would dangle once the top alias is gone.
+    let _ = std::fs::remove_file(format!("/dev/mapper/{name}"));
+
     Ok(errors)
 }
 

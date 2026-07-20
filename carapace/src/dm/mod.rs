@@ -37,6 +37,7 @@ mod uapi;
 
 pub use device::{
     list_devices_with_prefix, open_dm_control, remove_by_name, DmCreateMode, DmDevice,
+    DM_UDEV_PRIMARY_SOURCE_COOKIE,
 };
 pub use table::{DmTable, TableLine, TargetSpec};
 

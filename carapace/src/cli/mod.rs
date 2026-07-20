@@ -30,7 +30,7 @@ FLAGS:
 
 attach walks the chain backward from --root, validates parameters
 against the RDP whitelist, builds the dm stack, and prints the
-operator-visible /dev/dm-<minor> path on success. Partitions are
+operator-visible /dev/mapper/<name> path on success. Partitions are
 discovered by PARTUUID lookup against /sys/class/block/*/uevent —
 every visible GPT-partscanned block device contributes; no --storage
 flag and no GPT parser.

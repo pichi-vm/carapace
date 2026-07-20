@@ -14,11 +14,15 @@
 //! lives here.
 
 use crate::chain::ValidatedChain;
-use crate::dm::{open_dm_control, DmCreateMode, DmDevice, DmTable, TableLine, TargetSpec};
+use crate::dm::{
+    open_dm_control, DmCreateMode, DmDevice, DmTable, TableLine, TargetSpec,
+    DM_UDEV_PRIMARY_SOURCE_COOKIE,
+};
 use crate::snapshot::{ValidatedSnapshotHeader, SNAPSHOT_HEADER_SIZE};
 use crate::CarapaceError;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 /// dm-zero virtual length. Snapshot length lock: every per-scute
@@ -49,6 +53,7 @@ fn activate_one_line(
     mode: DmCreateMode,
     length_sectors: u64,
     target: TargetSpec,
+    udev_cookie: u32,
 ) -> Result<DmDevice, CarapaceError> {
     let dev = DmDevice::create(control, name, mode)?;
     let t = DmTable {
@@ -59,7 +64,7 @@ fn activate_one_line(
         }],
     };
     dev.load_table(control, &t)?;
-    dev.resume(control)?;
+    dev.resume(control, udev_cookie)?;
     Ok(dev)
 }
 
@@ -86,10 +91,11 @@ fn validate_snapshot_header_through_verity(
 
 /// Build the full read stack — `<name>-z0`, then per-scute pair
 /// `<name>-v<i>` and `<name>-s<i>`, then top alias `<name>` — and
-/// return the operator-visible `/dev/dm-<minor>` path of the top
-/// alias. On any error the partial stack is torn down in reverse-push
-/// order via [`RollbackOnDrop`]; on success the devices are forgotten
-/// so the kernel state outlives this process.
+/// return the operator-visible `/dev/mapper/<name>` path (a symlink
+/// carapace creates itself; see [`link_mapper_node`]). On any error the
+/// partial stack is torn down in reverse-push order via
+/// [`RollbackOnDrop`]; on success the devices are forgotten so the
+/// kernel state outlives this process.
 ///
 /// dm-verity references the cow/verity partition devices by `<maj>:<min>`
 /// (sysfs-published at GPT-partscan time; no udev sync). The chunk_size
@@ -131,6 +137,8 @@ pub(crate) fn assemble_read_stack(
         DmCreateMode::ReadWrite,
         ZERO_COUNT_SECTORS,
         TargetSpec::Zero,
+        // Internal layer: no /dev/mapper entry, so no udev cookie.
+        0,
     )?;
     stack.devices.push(z);
 
@@ -149,6 +157,7 @@ pub(crate) fn assemble_read_stack(
                 scute.superblock.full_salt(),
                 &scute.root,
             ),
+            0,
         )?;
 
         // Snapshot-header sanity through the activated dm-verity device.
@@ -179,6 +188,7 @@ pub(crate) fn assemble_read_stack(
                 cow,
                 chunk_size_sectors: SNAPSHOT_CHUNK_SIZE_SECTORS,
             },
+            0,
         )?;
         stack.devices.push(s);
     }
@@ -201,15 +211,41 @@ pub(crate) fn assemble_read_stack(
             device: stack.devices.last().unwrap().dev_ref(),
             offset_sectors: 0,
         },
+        // Top alias: the authoritative activation of the operator-visible
+        // /dev/mapper/<name>. The primary-source cookie makes udev's DM
+        // rules create and keep the symlink + systemd .device alias.
+        DM_UDEV_PRIMARY_SOURCE_COOKIE,
     )?;
     // /dev/dm-<minor> is kernel-synchronous via devtmpfs at
-    // DM_DEV_CREATE time. The `/dev/mapper/<name>` symlink would
-    // arrive when udev catches up; we don't block on it.
-    let path = alias.dev_node();
+    // DM_DEV_CREATE time, but the operator-visible `/dev/mapper/<name>`
+    // is not: udev's `13-dm-disk.rules` only creates it for devices
+    // carrying `DM_UDEV_PRIMARY_SOURCE_FLAG`, which a raw dm ioctl does
+    // not set. carapace's whole point is to come up before udev (in an
+    // initramfs, ahead of `systemd-udevd`), so we create the symlink
+    // ourselves rather than depend on udev catching up — matching udev's
+    // own convention of a relative link to `../dm-<minor>`.
+    let (_, minor) = alias.dev_ref();
     stack.devices.push(alias);
 
+    let mapper = link_mapper_node(name, minor)?;
     stack.commit();
-    Ok(path)
+    Ok(mapper)
+}
+
+/// Create the operator-visible `/dev/mapper/<name>` symlink pointing at
+/// the kernel devtmpfs node `/dev/dm-<minor>`. A stale link from a
+/// prior attach of the same name is replaced. Called before
+/// [`RollbackOnDrop::commit`] so a failure here tears the dm stack back
+/// down.
+fn link_mapper_node(name: &str, minor: u32) -> Result<PathBuf, CarapaceError> {
+    let link = PathBuf::from(format!("/dev/mapper/{name}"));
+    match std::fs::remove_file(&link) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    symlink(format!("../dm-{minor}"), &link)?;
+    Ok(link)
 }
 
 /// RAII rollback for partially-built dm stacks. Pushed devices are
