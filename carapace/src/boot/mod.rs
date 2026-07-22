@@ -11,6 +11,10 @@
 //!   3. read `carapacehash=` (+ `root`/`rootfstype`/`init`) from the cmdline;
 //!   4. assemble the carapace into `/dev/mapper/root` and `switch_root` into it.
 //!
+//! Optionally, when `carapace.timing` is on the cmdline, it prints one boot
+//! timing marker just before the pivot (otherwise it is silent except on the
+//! fatal path).
+//!
 //! No systemd, no udev: carapace resolves partitions from `/sys` (kernel GPT
 //! partscan) and makes its own `/dev/mapper` node, so the whole initramfs is
 //! this one static binary plus a handful of `.ko`. The heavy lifting reuses the
@@ -70,9 +74,15 @@ fn boot() -> Result<(), String> {
     }
     let rootfstype = value(&cmdline, "rootfstype").unwrap_or("ext4");
     let init = value(&cmdline, "init").unwrap_or("/sbin/init");
+    // Opt-in boot timing: silent by default (a minimal PID1 speaks only on the
+    // fatal path); `carapace.timing` on the cmdline prints the switch_root mark.
+    let timing = has_flag(&cmdline, "carapace.timing");
 
     attach_with_retry(hash)?;
     sys::mount_root(&format!("/dev/mapper/{DEV_NAME}"), "/sysroot", rootfstype)?;
+    if timing {
+        sys::mark_switch_root(); // timing boundary: launch → root ready
+    }
     sys::switch_root("/sysroot", init)?; // never returns on success
     Err("switch_root returned unexpectedly".into())
 }
@@ -112,6 +122,15 @@ fn value<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
     found
 }
 
+/// True if a bare boolean flag is present on the command line — either as a lone
+/// token (`carapace.timing`) or with a value (`carapace.timing=1`). Exact token
+/// match, so it is not confused by a longer key that shares the prefix.
+fn has_flag(cmdline: &str, key: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .any(|tok| tok == key || tok.strip_prefix(key).is_some_and(|r| r.starts_with('=')))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +151,13 @@ mod tests {
         assert_eq!(value(c, "root"), Some("/dev/mapper/root")); // not confused by rootfstype
         assert_eq!(value(c, "init"), None);
         assert_eq!(value("carapacehash=", "carapacehash"), None); // empty ignored
+    }
+
+    #[test]
+    fn cmdline_flag_bare_and_valued_and_exact() {
+        assert!(has_flag("quiet carapace.timing ro", "carapace.timing")); // bare
+        assert!(has_flag("carapace.timing=1", "carapace.timing")); // with value
+        assert!(!has_flag("quiet ro", "carapace.timing")); // absent
+        assert!(!has_flag("carapace.timingx", "carapace.timing")); // not a prefix match
     }
 }

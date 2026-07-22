@@ -126,6 +126,37 @@ pub(super) fn finit_module(path: &Path, compressed: bool) -> Result<(), String> 
     Err(format!("finit_module {}: {err}", path.display()))
 }
 
+/// Read a POSIX clock as whole microseconds. Returns 0 if the clock read
+/// fails (this is a best-effort diagnostic, never a boot-critical value).
+fn clock_us(clk: libc::clockid_t) -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: the pointer targets a valid, writable timespec; clk is a plain
+    // clock id.
+    if unsafe { libc::clock_gettime(clk, &raw mut ts) } != 0 {
+        return 0;
+    }
+    (ts.tv_sec as u64) * 1_000_000 + (ts.tv_nsec as u64) / 1_000
+}
+
+/// Emit a timing marker to the console immediately before `switch_root`, when
+/// opted in via the `carapace.timing` cmdline flag (off by default — a minimal
+/// PID1 is otherwise silent except on the fatal path). This is the boundary of
+/// the "launch → root ready" interval we optimize: it prints `boot_us`
+/// (CLOCK_MONOTONIC, time since the guest kernel started, i.e. the
+/// kernel+initramfs slice) and `epoch_us` (CLOCK_REALTIME, for diffing against
+/// the host-recorded launch time). The clock is sampled first, so the console
+/// write's own latency is not counted.
+pub(super) fn mark_switch_root() {
+    let boot_us = clock_us(libc::CLOCK_MONOTONIC);
+    let epoch_us = clock_us(libc::CLOCK_REALTIME);
+    write_console(&format!(
+        "carapace: switch_root boot_us={boot_us} epoch_us={epoch_us}\n"
+    ));
+}
+
 /// Mount the assembled carapace root read-only at `target`.
 pub(super) fn mount_root(dev: &str, target: &str, fstype: &str) -> Result<(), String> {
     let _ = std::fs::create_dir_all(target);
