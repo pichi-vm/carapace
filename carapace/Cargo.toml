@@ -22,6 +22,9 @@ path = "src/main.rs"
 [target.'cfg(target_os = "linux")'.dependencies]
 # device-mapper ioctl declarations for the vendored `dm` module (src/dm/uapi.rs).
 iocuddle = "0.2"
+# raw syscalls for the initramfs init mode (mount / finit_module / switch_root /
+# reboot) — confined to the allow(unsafe_code) boundary in src/boot/sys.rs.
+libc = "0.2"
 thiserror = { workspace = true }
 zerocopy = { workspace = true }
 

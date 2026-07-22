@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-# CI gate: `unsafe` keyword permitted only in src/dm/uapi.rs (the
-# iocuddle ioctl-number declarations). Comment-only lines are exempt
-# (we discuss `unsafe` in module docstrings).
+# CI gate: `unsafe` keyword permitted only in src/dm/uapi.rs (iocuddle
+# ioctl-number declarations) and src/boot/sys.rs (initramfs-init raw syscalls:
+# mount/finit_module/switch_root/reboot). Comment-only lines are exempt (we
+# discuss `unsafe` in module docstrings).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -18,20 +19,20 @@ if [ "$GREP" = "rg" ]; then
     matches=$(rg --line-number --type rust '\bunsafe\b' src/ \
         | grep -vE ':\s*//' \
         | grep -vE '\s*//.*\bunsafe\b' \
-        | grep -vE '^src/dm/uapi\.rs:' \
+        | grep -vE '^src/(dm/uapi|boot/sys)\.rs:' \
         || true)
 else
     matches=$(grep -RnE '\bunsafe\b' src/ \
         | grep -vE ':\s*//' \
         | grep -vE '\s*//.*\bunsafe\b' \
-        | grep -vE '^src/dm/uapi\.rs:' \
+        | grep -vE '^src/(dm/uapi|boot/sys)\.rs:' \
         || true)
 fi
 
 if [ -n "$matches" ]; then
-    echo "FAIL: unsafe keyword outside src/dm/uapi.rs:" >&2
+    echo "FAIL: unsafe keyword outside src/dm/uapi.rs and src/boot/sys.rs:" >&2
     echo "$matches" >&2
     exit 1
 fi
 
-echo "OK: unsafe boundary intact (only src/dm/uapi.rs)"
+echo "OK: unsafe boundary intact (only src/dm/uapi.rs and src/boot/sys.rs)"

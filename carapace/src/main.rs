@@ -11,17 +11,24 @@
 #![deny(unsafe_code)]
 #![cfg(target_os = "linux")]
 
+mod boot;
 mod cli;
 mod generator;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    // Multi-call dispatch: when invoked as the systemd generator (via the
-    // `systemd-carapace-generator` symlink dracut installs into
-    // `/usr/lib/systemd/system-generators/`), systemd passes three output
-    // directories and expects unit files written — not the normal CLI.
+    // Multi-call dispatch on argv[0]:
+    //   * as the initramfs init (`rdinit=/init`, the kernel default) → be PID1:
+    //     mount, load modules, assemble the carapace, and switch_root — no
+    //     systemd/udev in the initramfs (see `boot`);
+    //   * as the `systemd-carapace-generator` symlink → emit the attach unit
+    //     (the legacy systemd-in-initramfs path);
+    //   * otherwise → the normal `attach` / `detach` CLI.
     let arg0 = std::env::args().next().unwrap_or_default();
+    if boot::invoked_as_init(&arg0) {
+        return boot::run();
+    }
     if generator::invoked_as_generator(&arg0) {
         return generator::run();
     }
