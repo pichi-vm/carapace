@@ -189,7 +189,7 @@ struct verity_sb {
     uint8_t  signature[8];    // "verity\0\0"
     uint32_t version;         // chain parameter
     uint32_t hash_type;       // chain parameter
-    uint8_t  uuid[16];
+    uint8_t  uuid[16];        // per-scute; NOT trust-covered (see below)
     uint8_t  algorithm[32];   // chain parameter
     uint32_t data_block_size; // chain parameter
     uint32_t hash_block_size; // chain parameter
@@ -209,6 +209,7 @@ The hash tree follows the superblock, aligned to `hash_block_size`.
 - The superblock fields annotated `// chain parameter` above MUST equal the chain's corresponding value (see [Chain Parameters](#chain-parameters)).
 - `salt_size` MUST be at most 256 and at least `digest_size`. Every scute (base and non-base alike) carries a `digest_size`-byte prefix; the rule is uniform.
 - The salt contents are subject to the salt structure rules below.
+- The `uuid` field is **outside the carapace trust model**: it is not a chain parameter, is not an input to `rootᵢ` (which is computed over the cow data and salt only), and is not checked by [Consumer Verification](#consumer-verification-and-setup-normative). Consumers **MUST NOT** treat `uuid` as a trusted identifier or use it in any security decision — an adversary controlling stored bytes may set it to any value without detection, as it does not cascade to `rootₙ₋₁`. Builders **SHOULD** write all-zero bytes as a "not an identity" sentinel; a consumer reconstructing a verity file (see [Distribution Without Verity Files](#distribution-without-verity-files)) **SHOULD** likewise write all-zero rather than a meaningful-looking value.
 
 **Salt structure (normative).** The salt consists of a `digest_size`-byte prefix followed by an optional suffix.
 
@@ -386,6 +387,8 @@ The GPT deployment pattern is deliberately shaped to compose with systemd's exis
 
 **PARTUUID discovery matches the DPS.** The [PARTUUID Assignment](#partuuid-assignment) rule — cow ← `root[0..16]`, verity ← `root[16..32]` — is the same encoding the Discoverable Partitions Specification uses for verity (data partition ← first 128 bits of the root hash, verity partition ← the last 128 bits). The scute type GUIDs ([Partition Types](#partition-types)) are carapace-defined; registering them with the DPS is the natural path to first-class recognition. They are intentionally arch-neutral: one carapace is one image, so arch-based root selection (the reason the DPS verity types are per-architecture) does not apply.
 
+**Device identity derives from the root, not the superblock.** A consumer that exposes an operator- or guest-visible device identity (a `/dev/disk/by-id/dm-uuid-*` link, a device-mapper uuid) MUST derive it from the trusted `rootᵢ`, never from the superblock `uuid` (which is adversary-controllable — see [Why the superblock `uuid` carries no trust](#why-the-superblock-uuid-carries-no-trust)). carapace leaves device uuids unset, relying on the name contract (`root=/dev/mapper/root`) and the verity-covered filesystem uuid.
+
 **Filesystem vs. inner GPT is content-probed, not signalled.** Once `/dev/mapper/root` exists, what it contains is determined exactly as systemd already determines it for any root device (see `systemd-dissect`): a bare filesystem is mounted directly; a device carrying a GPT is dissected and its inner root/`usr`/… discovered by DPS type GUID (`systemd-gpt-auto`). No additional command-line signal is needed — `carapacehash=` conveys only the chain anchor; the inner shape is systemd's normal determination.
 
 **Integrity covers the whole assembled device.** Unlike systemd's outer `roothash=`, where verity protects the contents of a partition, a carapace's chain integrity-protects the *entire* assembled block device. An inner GPT's partitions therefore need not carry their own verity — `rootₙ₋₁` already covers everything inside `/dev/mapper/root`. This keeps the model a single trust anchor rather than nested verity domains.
@@ -437,6 +440,10 @@ dm-zero requires a size at activation time; that size is one of the inputs to th
 
 The chosen value (`2⁵⁶` sectors ≈ 32 EiB) is far above the maximum size of any distributable filesystem: larger than ext4's 1 EiB ceiling, at parity with btrfs and XFS (16 EiB), and well below 2⁶³ so there is no signed/unsigned arithmetic ambiguity in any plausible implementation. dm-zero is virtual; declaring a huge size costs nothing at runtime. Any carapace whose actual composed device size is smaller (which is every realistic carapace) sees the extra sectors as unused tail.
 
+### Why the superblock `uuid` carries no trust
+
+The `uuid` field is inherited from the dm-verity superblock format, but it is never hashed into the tree and plays no part in chain composition or the salt chain. Trust in an out-of-chain field can come only from *provenance* — a trusted party deriving it from verified inputs at the point of use — not from making it *validatable*, which is an optional check that non-conforming consumers skip. Presenting a meaningful-looking `uuid` that an adversary can forge and a careless consumer might trust is worse than presenting none, so carapace declares the field untrusted and recommends a zero sentinel. A consumer that needs a trusted, content-bound identity already has one: `rootᵢ` itself (and the DDI PARTUUIDs derived from it), and — for the composed device — the filesystem's own uuid, which resides inside the verity-covered device and is therefore integrity-protected.
+
 ## Defeating Adversarial Behavior
 
 This section enumerates specific attacks available to the adversary described in the [Threat Model](#threat-model) and shows how each fails.
@@ -452,6 +459,7 @@ This section enumerates specific attacks available to the adversary described in
 | Adversary substitutes the base scute with one declaring non-whitelisted parameters (e.g., sha1) | Consumer rejects on whitelist check before any chain walk. |
 | Adversary presents fewer scutes than the chain requires | Chain walk fails to reach a valid `rootₙ₋₁`. |
 | Adversary presents extra scutes | Those outside the salt chain from the trusted `rootₙ₋₁` are simply not referenced; those included must still produce a chain terminating at `rootₙ₋₁`. |
+| Adversary sets a scute's superblock `uuid` to a chosen value | No effect — `uuid` is outside the trust chain; consumers MUST NOT rely on it. It does not affect `rootᵢ`, so it can neither break nor forge verification. |
 
 ### GPT-pattern-specific attacks
 
