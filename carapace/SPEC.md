@@ -18,7 +18,7 @@ Any application needing compositional read-only block layers with cryptographic 
 
 | Term | Meaning |
 |---|---|
-| Scute | A single layer: a cow file and a verity file |
+| Scute | A single layer: a data file and a hash file |
 | Carapace | The composed stack of scutes, presented as a unified block device |
 | `rootᵢ` | The dm-verity root hash of the scute at chain position i |
 | `N` | The number of scutes in a carapace. Scutes are indexed 0 through N-1 |
@@ -64,8 +64,8 @@ See [Defeating Adversarial Behavior](#defeating-adversarial-behavior) for how ea
 
 A scute consists of two byte sequences:
 
-- A **cow file**: a dm-snapshot persistent exception store.
-- A **verity file**: a dm-verity superblock followed by a hash tree computed over the cow file.
+- A **data file**: a dm-snapshot persistent exception store.
+- A **hash file**: a dm-verity superblock followed by a hash tree computed over the data file.
 
 A carapace is an ordered sequence of N scutes, composed via dm-snapshot and dm-verity stacking. Every scute in a carapace MUST declare identical chain parameters (hash algorithm, block sizes, format version, snapshot chunk size); these parameters are set by the base scute and inherited by all others.
 
@@ -73,31 +73,31 @@ The trust chain is established by salt propagation. Every scute's dm-verity salt
 
 - For every non-base scute at position `i`: the salt begins with a required prefix equal to `rootᵢ₋₁`, optionally followed by a builder-defined suffix.
 - For the base scute: the salt begins with a required prefix of `digest_size` zero bytes (the sentinel marking "no parent"), optionally followed by a builder-defined suffix. Conventionally the suffix is `digest_size` random bytes, which makes `root₀` (and therefore `rootₙ₋₁`) unique per build.
-- For every scute: `rootᵢ = verity_root(cowᵢ, saltᵢ)`, computed over the full salt (prefix plus any suffix) during build.
+- For every scute: `rootᵢ = verity_root(dataᵢ, saltᵢ)`, computed over the full salt (prefix plus any suffix) during build.
 
 At mount time, the consumer walks the chain, computes `rootᵢ` for each scute using its declared full salt, verifies `rootₙ₋₁` matches the trusted value, and configures the device-mapper stack.
 
 ### Example: Three-Scute Carapace
 
-The diagram below shows a complete carapace with three scutes from the perspective of a chain-assembly tool. Each scute has a pair of on-disk files (`cowᵢ`, `verityᵢ`) and two virtual devices that the tool constructs (`dm-verityᵢ`, `dm-snapshotᵢ`). The carapace is the ordered stack of all three scutes plus the snapshot chain's base (`dm-zero`); everything inside the outer rounded rectangle is the carapace itself. The value `root₂` enters from outside — it is the only input the tool needs that is not already on disk.
+The diagram below shows a complete carapace with three scutes from the perspective of a chain-assembly tool. Each scute has a pair of on-disk files (`dataᵢ`, `hashᵢ`) and two virtual devices that the tool constructs (`dm-verityᵢ`, `dm-snapshotᵢ`). The carapace is the ordered stack of all three scutes plus the snapshot chain's base (`dm-zero`); everything inside the outer rounded rectangle is the carapace itself. The value `root₂` enters from outside — it is the only input the tool needs that is not already on disk.
 
 ![Carapace with three scutes](carapace.excalidraw.svg)
 
 The numbered steps trace the assembly algorithm. The tool works from the bottom up, building each layer's virtual devices once it has the expected root for that layer:
 
-1. Read `root₀` from `verity₁`'s salt field.
-2. Build `dm-verity₀` from `cow₀` + `verity₀`, using `root₀` as the expected root.
+1. Read `root₀` from `hash₁`'s salt field.
+2. Build `dm-verity₀` from `data₀` + `hash₀`, using `root₀` as the expected root.
 3. Build `dm-snapshot₀` with `dm-zero` as origin and `dm-verity₀` as the CoW device.
-4. Read `root₁` from `verity₂`'s salt field.
-5. Build `dm-verity₁` from `cow₁` + `verity₁`, using `root₁`.
+4. Read `root₁` from `hash₂`'s salt field.
+5. Build `dm-verity₁` from `data₁` + `hash₁`, using `root₁`.
 6. Build `dm-snapshot₁` with `dm-snapshot₀` as origin and `dm-verity₁` as the CoW device.
 7. Read `root₂` from the trusted channel.
-8. Build `dm-verity₂` from `cow₂` + `verity₂`, using `root₂`.
+8. Build `dm-verity₂` from `data₂` + `hash₂`, using `root₂`.
 9. Build `dm-snapshot₂` with `dm-snapshot₁` as origin and `dm-verity₂` as the CoW device.
 
 `dm-snapshot₂` now contains the trusted read-only filesystem — this is the composed carapace.
 
-The only input from outside the carapace is `root₂`. Every other root value is read from the salt prefix of the verity file one layer above. Scute 0 is the base: its salt is entirely builder-defined (conventionally random bytes) with no prefix constraint, and its snapshot's origin is `dm-zero`. If at any step `dm-verityᵢ` refuses to activate with the supplied root — because the hash tree in `verityᵢ` does not hash to the expected value — assembly fails and no dm-snapshot is produced.
+The only input from outside the carapace is `root₂`. Every other root value is read from the salt prefix of the hash file one layer above. Scute 0 is the base: its salt is entirely builder-defined (conventionally random bytes) with no prefix constraint, and its snapshot's origin is `dm-zero`. If at any step `dm-verityᵢ` refuses to activate with the supplied root — because the hash tree in `hashᵢ` does not hash to the expected value — assembly fails and no dm-snapshot is produced.
 
 ## On-Disk Format (Normative)
 
@@ -154,9 +154,9 @@ Builders SHOULD use the following chain parameters unless a specific reason exis
 
 This profile matches typical filesystem page sizes, has broad kernel support, and uses a hash algorithm with current cryptographic standing.
 
-### cow File Layout
+### data File Layout
 
-Each cow file is a dm-snapshot persistent exception store as defined by the Linux kernel (`drivers/md/dm-snap-persistent.c`). That upstream format governs the on-disk layout and is not redefined here; this specification constrains only the parameter values that carapace requires.
+Each data file is a dm-snapshot persistent exception store as defined by the Linux kernel (`drivers/md/dm-snap-persistent.c`). That upstream format governs the on-disk layout and is not redefined here; this specification constrains only the parameter values that carapace requires.
 
 For reference, at the time of this specification the disk header at the start of the first chunk is:
 
@@ -174,12 +174,12 @@ All fields little-endian. The exception table and data chunks follow per the sta
 
 **Normative requirements:**
 
-- The cow file MUST be a valid dm-snapshot persistent exception store as the kernel defines it at the time of consumption.
+- The data file MUST be a valid dm-snapshot persistent exception store as the kernel defines it at the time of consumption.
 - `chunk_size` MUST equal the chain's `chunk_size` (a chain parameter set by the base scute).
 
-### verity File Layout
+### hash File Layout
 
-Each verity file begins at offset 0 with a dm-verity superblock as defined by `cryptsetup` (`lib/verity/verity.c`), followed by the hash tree. The superblock and hash tree layout are governed by that upstream format and are not redefined here; this specification constrains only the field values and salt semantics that carapace requires.
+Each hash file begins at offset 0 with a dm-verity superblock as defined by `cryptsetup` (`lib/verity/verity.c`), followed by the hash tree. The superblock and hash tree layout are governed by that upstream format and are not redefined here; this specification constrains only the field values and salt semantics that carapace requires.
 
 For reference, at the time of this specification the superblock layout is:
 
@@ -205,11 +205,11 @@ The hash tree follows the superblock, aligned to `hash_block_size`.
 
 **Normative requirements.**
 
-- The verity file MUST be a valid dm-verity image as the upstream format defines it at the time of consumption.
+- The hash file MUST be a valid dm-verity image as the upstream format defines it at the time of consumption.
 - The superblock fields annotated `// chain parameter` above MUST equal the chain's corresponding value (see [Chain Parameters](#chain-parameters)).
 - `salt_size` MUST be at most 256 and at least `digest_size`. Every scute (base and non-base alike) carries a `digest_size`-byte prefix; the rule is uniform.
 - The salt contents are subject to the salt structure rules below.
-- The `uuid` field is **outside the carapace trust model**: it is not a chain parameter, is not an input to `rootᵢ` (which is computed over the cow data and salt only), and is not checked by [Consumer Verification](#consumer-verification-and-setup-normative). Consumers **MUST NOT** treat `uuid` as a trusted identifier or use it in any security decision — an adversary controlling stored bytes may set it to any value without detection, as it does not cascade to `rootₙ₋₁`. Builders **SHOULD** write all-zero bytes as a "not an identity" sentinel; a consumer reconstructing a verity file (see [Distribution Without Verity Files](#distribution-without-verity-files)) **SHOULD** likewise write all-zero rather than a meaningful-looking value.
+- The `uuid` field is **outside the carapace trust model**: it is not a chain parameter, is not an input to `rootᵢ` (which is computed over the data file and salt only), and is not checked by [Consumer Verification](#consumer-verification-and-setup-normative). Consumers **MUST NOT** treat `uuid` as a trusted identifier or use it in any security decision — an adversary controlling stored bytes may set it to any value without detection, as it does not cascade to `rootₙ₋₁`. Builders **SHOULD** write all-zero bytes as a "not an identity" sentinel; a consumer reconstructing a hash file (see [Distribution Without Hash Files](#distribution-without-hash-files)) **SHOULD** likewise write all-zero rather than a meaningful-looking value.
 
 **Salt structure (normative).** The salt consists of a `digest_size`-byte prefix followed by an optional suffix.
 
@@ -244,24 +244,24 @@ A consumer also holds these per-consumer values, whose integrity is assured by w
 
 ## Build Process (Normative)
 
-A builder produces a carapace by constructing each scute's cow file (a dm-snapshot persistent exception store) and verity file (a dm-verity image), in an order that respects the salt-chain dependency. For scute `i > 0`, constructing the verity file requires `rootᵢ₋₁`; therefore the scutes MUST be built from base (position 0) upward.
+A builder produces a carapace by constructing each scute's data file (a dm-snapshot persistent exception store) and hash file (a dm-verity image), in an order that respects the salt-chain dependency. For scute `i > 0`, constructing the hash file requires `rootᵢ₋₁`; therefore the scutes MUST be built from base (position 0) upward.
 
 For each scute:
 
-- The cow file MUST be constructed so that, when used as a dm-snapshot CoW device layered on top of the scute at position `i−1` (or dm-zero, for the base), it produces the intended content for this layer.
-- The verity file MUST be constructed with `chain_params` matching those of the base scute, with `salt_size` and `salt` contents satisfying the salt structure rules (see [verity File Layout](#verity-file-layout)).
-- `rootᵢ` is the dm-verity root hash computed from the cow file and the full salt.
+- The data file MUST be constructed so that, when used as a dm-snapshot CoW device layered on top of the scute at position `i−1` (or dm-zero, for the base), it produces the intended content for this layer.
+- The hash file MUST be constructed with `chain_params` matching those of the base scute, with `salt_size` and `salt` contents satisfying the salt structure rules (see [hash File Layout](#hash-file-layout)).
+- `rootᵢ` is the dm-verity root hash computed from the data file and the full salt.
 
 The base scute's salt prefix is `digest_size` zero bytes (the no-parent sentinel); the builder chooses the suffix (typically `digest_size` random bytes to produce a unique `root₀` per build). For each non-base scute the builder independently chooses whether to supply a non-empty salt suffix beyond the parent-root prefix.
 
-Packaging and distribution of cow and verity files are outside the scope of this specification.
+Packaging and distribution of data and hash files are outside the scope of this specification.
 
 ## Consumer Interface (Normative)
 
 The carapace core imposes minimal requirements on the consumer's environment. A consumer MUST be able to:
 
 - Obtain the trusted `rootₙ₋₁` value.
-- Given a sequence of scutes in chain order, obtain each scute's cow file and verity file as block-addressable ranges.
+- Given a sequence of scutes in chain order, obtain each scute's data file and hash file as block-addressable ranges.
 
 How the consumer resolves scute identities, discovers chain order, and locates blobs is a **deployment concern**, not part of the carapace core. Deployment patterns are described separately; the GPT pattern below is one such pattern.
 
@@ -273,13 +273,13 @@ Given an ordered sequence of scutes and a trusted `rootₙ₋₁`, a consumer MU
 
 **Per-scute validation.** For each scute `i ∈ [0, N)`, its verity superblock's `algorithm`, `data_block_size`, `hash_block_size`, `hash_type`, and `version` MUST equal the corresponding `chain_params` value. `salt_size` MUST be at most 256 and at least `digest_size` (the digest length of `chain_params.algorithm`).
 
-**Salt chain validation.** For each scute `i > 0`, the first `digest_size` bytes of the verity superblock's salt MUST equal the consumer-computed `rootᵢ₋₁`. For the base scute (`i = 0`), the first `digest_size` bytes MUST be all zero — the sentinel marking "no parent." Here `rootᵢ` is computed from the cow file and the full salt (`salt[0..salt_size]`) per the dm-verity construction using `chain_params.algorithm`. The chain walk identifies the base scute by detecting the zero-prefix sentinel; no out-of-band base marker is required.
+**Salt chain validation.** For each scute `i > 0`, the first `digest_size` bytes of the verity superblock's salt MUST equal the consumer-computed `rootᵢ₋₁`. For the base scute (`i = 0`), the first `digest_size` bytes MUST be all zero — the sentinel marking "no parent." Here `rootᵢ` is computed from the data file and the full salt (`salt[0..salt_size]`) per the dm-verity construction using `chain_params.algorithm`. The chain walk identifies the base scute by detecting the zero-prefix sentinel; no out-of-band base marker is required.
 
 **Trust terminus.** The computed `rootₙ₋₁` MUST equal the trusted `rootₙ₋₁`.
 
 **Chunk-size consistency.** The `chunk_size` field in each scute's dm-snapshot header (read through the activated dm-verity device so that it is integrity-protected) MUST be identical across all scutes and MUST equal the whitelisted `chunk_size` (see [Parameter Whitelist](#parameter-whitelist)).
 
-**Device setup.** Once the above checks pass, the consumer activates the device-mapper stack bottom-up: a dm-zero device with the mapping table entry `ZERO_START ZERO_COUNT zero`, then for each scute in order `0..N` a dm-verity device over the cow and verity files (using the computed `rootᵢ` as the expected root and the superblock's salt contents), then a dm-snapshot device whose origin is the previous layer (dm-zero for the base, the prior snapshot otherwise) and whose CoW device is the current scute's dm-verity device. The top snapshot is the composed carapace.
+**Device setup.** Once the above checks pass, the consumer activates the device-mapper stack bottom-up: a dm-zero device with the mapping table entry `ZERO_START ZERO_COUNT zero`, then for each scute in order `0..N` a dm-verity device over the data and hash files (using the computed `rootᵢ` as the expected root and the superblock's salt contents), then a dm-snapshot device whose origin is the previous layer (dm-zero for the base, the prior snapshot otherwise) and whose CoW device is the current scute's dm-verity device. The top snapshot is the composed carapace.
 
 Any failure at any step is a hard failure; the composed device MUST NOT be exposed. Subsequent runtime integrity failures from dm-verity on block reads are also hard failures.
 
@@ -297,8 +297,8 @@ Scutes under this pattern are stored as pairs of GPT partitions. The partitions 
 
 | Role | Type GUID |
 |---|---|
-| SCUTE_COW | `11dd804a-e1bf-4ab3-98c1-f9f48ceedbf1` |
-| SCUTE_VERITY | `40bb9571-2972-4547-b580-6a8cb13fd7d1` |
+| SCUTE_DATA | `11dd804a-e1bf-4ab3-98c1-f9f48ceedbf1` |
+| SCUTE_HASH | `40bb9571-2972-4547-b580-6a8cb13fd7d1` |
 
 The chain walk identifies the base scute by the zero-prefix sentinel in its salt (see [Consumer Verification](#consumer-verification-and-setup-normative)); no GPT attribute is involved.
 
@@ -307,8 +307,8 @@ The chain walk identifies the base scute by the zero-prefix sentinel in its salt
 For every scute pair:
 
 ```
-cow_partition.partuuid    = root[i][ 0..16]
-verity_partition.partuuid = root[i][16..32]
+data_partition.partuuid = root[i][ 0..16]
+hash_partition.partuuid = root[i][16..32]
 ```
 
 PARTUUIDs are globally unique identifiers; the consumer resolves them across the union of visible GPT partitions, regardless of which device each partition resides on.
@@ -319,35 +319,35 @@ The consumer enumerates scutes by walking backward from the top:
 
 ```
 # Locate the top scute using the trusted root[N-1]
-verity_top = find_partition_by_partuuid(root[N-1][16..32])
-If not found or type_guid != SCUTE_VERITY: FAIL.
-cow_top    = find_partition_by_partuuid(root[N-1][0..16])
-If not found or type_guid != SCUTE_COW: FAIL.
+hash_top = find_partition_by_partuuid(root[N-1][16..32])
+If not found or type_guid != SCUTE_HASH: FAIL.
+data_top = find_partition_by_partuuid(root[N-1][0..16])
+If not found or type_guid != SCUTE_DATA: FAIL.
 
-scutes = [(cow_top, verity_top)]
-current_verity = verity_top
+scutes = [(data_top, hash_top)]
+current_hash = hash_top
 
 loop:
-    sb = read_verity_superblock(current_verity)
+    sb = read_verity_superblock(current_hash)
     # (standard validations as in Consumer Verification)
 
     If sb.salt[0..digest_size] == 0:
         Break.  # base reached (zero-prefix sentinel)
 
     salt = sb.salt[0..32]   # parent root (first 32 bytes regardless of digest_size)
-    parent_cow    = find_partition_by_partuuid(salt[0..16])
-    parent_verity = find_partition_by_partuuid(salt[16..32])
+    parent_data = find_partition_by_partuuid(salt[0..16])
+    parent_hash = find_partition_by_partuuid(salt[16..32])
     If either not found: FAIL.
-    If parent_cow.type_guid != SCUTE_COW: FAIL.
-    If parent_verity.type_guid != SCUTE_VERITY: FAIL.
+    If parent_data.type_guid != SCUTE_DATA: FAIL.
+    If parent_hash.type_guid != SCUTE_HASH: FAIL.
 
-    scutes.prepend((parent_cow, parent_verity))
-    current_verity = parent_verity
+    scutes.prepend((parent_data, parent_hash))
+    current_hash = parent_hash
 
 # scutes is now ordered base -> top; proceed to Consumer Verification.
 ```
 
-After the walk, the consumer has an ordered list of (cow, verity) pairs to feed into Consumer Verification and Setup.
+After the walk, the consumer has an ordered list of (data, hash) pairs to feed into Consumer Verification and Setup.
 
 ### Discovery Integrity
 
@@ -365,13 +365,13 @@ A VMM implementing carapace support for confidential VMs using the GPT deploymen
 
 This is an implementation choice, not a requirement. A VMM may equally well expose multiple virtio-blk devices if that better suits the orchestration model.
 
-### Distribution Without Verity Files
+### Distribution Without Hash Files
 
-A scute's verity file is a deterministic function of its cow file, its full salt, and the chain parameters. The dm-verity construction has no implementation degrees of freedom: its byte layout is fixed by what the kernel will accept on activation, so two correct implementations produce bit-identical verity files from identical inputs.
+A scute's hash file is a deterministic function of its data file, its full salt, and the chain parameters. The dm-verity construction has no implementation degrees of freedom: its byte layout is fixed by what the kernel will accept on activation, so two correct implementations produce bit-identical hash files from identical inputs.
 
-A builder or distribution layer therefore need not ship verity files at all. It MAY instead ship the cow files alongside each scute's full salt, the chain parameters, and the trusted `rootₙ₋₁`, and rely on the consumer to reconstruct each verity file locally before running [Consumer Verification and Setup](#consumer-verification-and-setup-normative). Reconstruction is single-pass over cow data the consumer was already going to read at activation time. The reduction in distribution size is the verity overhead — roughly 1/127 of the cow size for the recommended default profile.
+A builder or distribution layer therefore need not ship hash files at all. It MAY instead ship the data files alongside each scute's full salt, the chain parameters, and the trusted `rootₙ₋₁`, and rely on the consumer to reconstruct each hash file locally before running [Consumer Verification and Setup](#consumer-verification-and-setup-normative). Reconstruction is single-pass over data the consumer was already going to read at activation time. The reduction in distribution size is the verity overhead — roughly 1/127 of the data size for the recommended default profile.
 
-The trust properties stated in [Threat Model](#threat-model) are preserved without additional consumer-side work: the salt-chain and trust-terminus checks already operate on consumer-computed `rootᵢ` values, regardless of whether the verity file was received or reconstructed. Streaming reconstruction also admits a fail-fast pipeline — the chain commitment for scute `i` can be checked as soon as scute `i`'s tree is built, aborting a multi-scute pull at the boundary instead of after the full download.
+The trust properties stated in [Threat Model](#threat-model) are preserved without additional consumer-side work: the salt-chain and trust-terminus checks already operate on consumer-computed `rootᵢ` values, regardless of whether the hash file was received or reconstructed. Streaming reconstruction also admits a fail-fast pipeline — the chain commitment for scute `i` can be checked as soon as scute `i`'s tree is built, aborting a multi-scute pull at the boundary instead of after the full download.
 
 This is an implementation choice, not a requirement. The on-disk format the kernel consumes (see [On-Disk Format](#on-disk-format-normative)) is unchanged either way; only what crosses the wire between builder and consumer is at issue.
 
@@ -385,7 +385,7 @@ The GPT deployment pattern is deliberately shaped to compose with systemd's exis
 
 **The assembler owns `/dev/mapper/<name>`, not udev.** The stack comes up in the initramfs *before* `systemd-udevd`, and each layer is a raw `/dev/mapper/control` ioctl that carries no udev synchronization cookie. The assembler therefore creates the operator-visible `/dev/mapper/<name>` symlink (→ the kernel-synchronous `/dev/dm-<minor>`) itself rather than waiting for udev to catch up. On the top alias's resume it sets the udev *primary-source* flag in the ioctl cookie (`event_nr`), so when `systemd-udevd` later coldplugs the device its DM rules recognize the activation as authoritative — creating the systemd `dev-mapper-<name>.device` alias and leaving the symlink in place instead of tearing it down. The two mechanisms are complementary: the symlink guarantees the path exists the instant `attach` returns; the cookie keeps udev cooperative once it starts.
 
-**PARTUUID discovery matches the DPS.** The [PARTUUID Assignment](#partuuid-assignment) rule — cow ← `root[0..16]`, verity ← `root[16..32]` — is the same encoding the Discoverable Partitions Specification uses for verity (data partition ← first 128 bits of the root hash, verity partition ← the last 128 bits). The scute type GUIDs ([Partition Types](#partition-types)) are carapace-defined; registering them with the DPS is the natural path to first-class recognition. They are intentionally arch-neutral: one carapace is one image, so arch-based root selection (the reason the DPS verity types are per-architecture) does not apply.
+**PARTUUID discovery matches the DPS.** The [PARTUUID Assignment](#partuuid-assignment) rule — data ← `root[0..16]`, hash ← `root[16..32]` — is the same encoding the Discoverable Partitions Specification uses for verity (data partition ← first 128 bits of the root hash, verity partition ← the last 128 bits). The scute type GUIDs ([Partition Types](#partition-types)) are carapace-defined; registering them with the DPS is the natural path to first-class recognition. They are intentionally arch-neutral: one carapace is one image, so arch-based root selection (the reason the DPS verity types are per-architecture) does not apply.
 
 **Device identity derives from the root, not the superblock.** A consumer that exposes an operator- or guest-visible device identity (a `/dev/disk/by-id/dm-uuid-*` link, a device-mapper uuid) MUST derive it from the trusted `rootᵢ`, never from the superblock `uuid` (which is adversary-controllable — see [Why the superblock `uuid` carries no trust](#why-the-superblock-uuid-carries-no-trust)). carapace leaves device uuids unset, relying on the name contract (`root=/dev/mapper/root`) and the verity-covered filesystem uuid.
 
@@ -406,11 +406,11 @@ Discovery is unverified; trust is established by the chain terminating at the tr
 
 ### Why salt propagation instead of stored parent references
 
-An earlier design considered carrying each scute's parent `rootᵢ₋₁` inside its cow file as explicit metadata under verity. Salt propagation achieves the same binding using only the dm-verity salt field that already exists for this purpose (domain separation per verity volume). No custom parser, no custom format.
+An earlier design considered carrying each scute's parent `rootᵢ₋₁` inside its data file as explicit metadata under verity. Salt propagation achieves the same binding using only the dm-verity salt field that already exists for this purpose (domain separation per verity volume). No custom parser, no custom format.
 
 ### Why the base scute uses a zero-prefix sentinel + random suffix
 
-Every scute's salt has the same shape: `digest_size` bytes of "parent root" prefix followed by an optional suffix. For non-base scutes the prefix is the actual parent root. For the base scute there is no parent, so the prefix is `digest_size` zero bytes — a sentinel value that the consumer's chain walker uses to terminate. A real parent root would collide with the sentinel only at probability `2⁻²⁵⁶` for `sha256` (negligible); a substituted non-zero "fake parent root" would not match any visible verity partition's PARTUUID, causing a hard failure at parent lookup. The random suffix (conventionally `digest_size` bytes) gives every base build a unique `root₀`, cascading to `rootₙ₋₁`.
+Every scute's salt has the same shape: `digest_size` bytes of "parent root" prefix followed by an optional suffix. For non-base scutes the prefix is the actual parent root. For the base scute there is no parent, so the prefix is `digest_size` zero bytes — a sentinel value that the consumer's chain walker uses to terminate. A real parent root would collide with the sentinel only at probability `2⁻²⁵⁶` for `sha256` (negligible); a substituted non-zero "fake parent root" would not match any visible hash partition's PARTUUID, causing a hard failure at parent lookup. The random suffix (conventionally `digest_size` bytes) gives every base build a unique `root₀`, cascading to `rootₙ₋₁`.
 
 This design moves the chain-terminator marker into the dm-verity-hashed salt itself, so an adversary cannot toggle "is base" without invalidating the scute's hash tree. No GPT attribute flag, no out-of-band signal, no container-format dependency — chain termination is a property of the verity superblock content.
 
@@ -452,8 +452,8 @@ This section enumerates specific attacks available to the adversary described in
 
 | Attack | Mitigation |
 |---|---|
-| Adversary substitutes a scute's cow file | Verity tree commits to every byte; substitution changes computed `rootᵢ`; chain diverges from trusted `rootₙ₋₁`. |
-| Adversary substitutes a scute's verity file | Same. |
+| Adversary substitutes a scute's data file | Verity tree commits to every byte; substitution changes computed `rootᵢ`; chain diverges from trusted `rootₙ₋₁`. |
+| Adversary substitutes a scute's hash file | Same. |
 | Adversary modifies a salt in a verity superblock | Changes computed `rootᵢ`; cascades to `rootₙ₋₁`; fails. |
 | Adversary modifies a scute's chain parameters (hash algorithm, block sizes, etc.) | Consumer validates every scute's parameters match the base's; mismatch causes hard failure. |
 | Adversary substitutes the base scute with one declaring non-whitelisted parameters (e.g., sha1) | Consumer rejects on whitelist check before any chain walk. |
@@ -478,7 +478,7 @@ All failure modes are hard failures. No silent compromise.
 
 ### Verity tree cross-carapace deduplication
 
-Each scute's verity tree depends on the salt, which depends on the chain below. Two carapaces sharing a base scute content-wise but with different base salt values have different verity tree blobs even for the shared base. cow files deduplicate normally (same bytes, same content); verity trees are per-carapace.
+Each scute's verity tree depends on the salt, which depends on the chain below. Two carapaces sharing a base scute content-wise but with different base salt values have different verity tree blobs even for the shared base. data files deduplicate normally (same bytes, same content); verity trees are per-carapace.
 
 ## Glossary
 

@@ -177,7 +177,7 @@ fn rejects_attach_with_wrong_trusted_root() {
     cleanup_dm(&name);
 
     // Flip a single byte in the otherwise-valid trusted root. The
-    // walker tries to look up a verity partition whose PARTUUID is
+    // walker tries to look up a hash partition whose PARTUUID is
     // that mutated trusted_root[16..32], which doesn't exist.
     let mut bytes = decode_hex(&chain.trusted_root_hex).unwrap();
     bytes[20] ^= 0x55;

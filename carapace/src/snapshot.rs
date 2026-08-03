@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! dm-snapshot persistent on-disk header parser. Read through the
-//! activated dm-verity device — never directly from the cow partition,
+//! activated dm-verity device — never directly from the data partition,
 //! per spec §279.
 //!
 //! Per kernel `drivers/md/dm-snap-persistent.c` (and the v1.0 spec
-//! reference), the header is the first 16 bytes of the cow:
+//! reference), the header is the first 16 bytes of the data file:
 //!   magic (u32 LE) | valid (u32 LE) | version (u32 LE) | chunk_size (u32 LE)
 //! All numeric fields are little-endian.
 

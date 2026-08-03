@@ -28,8 +28,8 @@ carapace import --image fedora.raw --out layout --tag 43
 skopeo copy oci:layout:43 docker://ghcr.io/pichi-vm/fedora:43
 ```
 
-The OCI artifact ships scute **cow** blobs + salt annotations; verity trees are
-reconstructed by the consumer (SPEC.md, "Distribution Without Verity Files").
+The OCI artifact ships scute **data** blobs + salt annotations; verity trees are
+reconstructed by the consumer (SPEC.md, "Distribution Without Hash Files").
 
 ## License
 

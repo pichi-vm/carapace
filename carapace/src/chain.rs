@@ -28,7 +28,7 @@ pub(crate) const MAX_CHAIN_DEPTH: usize = 32;
 /// implicit in the position of each scute within `ValidatedChain.scutes`
 /// (BASE → TOP); no explicit `index` field is carried.
 ///
-/// Cow / verity are carried as `(major, minor)` tuples — exactly what
+/// Data / hash are carried as `(major, minor)` tuples — exactly what
 /// `ResolvedPartition::dev_ref` returns and what activation feeds into
 /// `TargetSpec::Linear` / `Snapshot` / `Verity`. We don't store the
 /// full `ResolvedPartition` here because the activation path doesn't
@@ -37,11 +37,11 @@ pub(crate) const MAX_CHAIN_DEPTH: usize = 32;
 /// cloning a `PathBuf` per scute during chain walk.
 #[derive(Debug, Clone)]
 pub(crate) struct ValidatedScute {
-    /// `(major, minor)` of the cow partition.
-    pub cow: (u32, u32),
-    /// `(major, minor)` of the verity partition.
-    pub verity: (u32, u32),
-    /// Parsed + whitelist-validated superblock for the verity partition.
+    /// `(major, minor)` of the data partition.
+    pub data: (u32, u32),
+    /// `(major, minor)` of the hash partition.
+    pub hash: (u32, u32),
+    /// Parsed + whitelist-validated superblock for the hash partition.
     pub superblock: ValidatedVeritySuperblock,
     /// THE root hash to feed dm-verity for this scute. CRITICAL-1: this
     /// is the *chain-computed* root, never derived from the scute's own
@@ -60,9 +60,9 @@ pub(crate) struct ValidatedChain {
 /// supplied out-of-band — kernel cmdline / signed UKI / etc.) backward
 /// via salt prefixes. Each step:
 ///
-/// 1. Resolve `current_root[..16]` (cow PARTUUID) and
-///    `current_root[16..32]` (verity PARTUUID) via `resolver`. The
-///    verity resolver also reads the 4 KiB superblock area in the
+/// 1. Resolve `current_root[..16]` (data PARTUUID) and
+///    `current_root[16..32]` (hash PARTUUID) via `resolver`. The
+///    hash resolver also reads the 4 KiB superblock area in the
 ///    same call.
 /// 2. Parse + whitelist-validate the superblock; enforce
 ///    chain-consistency on `algorithm` (spec §275 — every scute MUST
@@ -112,25 +112,25 @@ pub(crate) fn walk_chain(
 
         // PARTUUIDs always derive from the first 32 bytes of the root
         // regardless of digest_size (fixed convention, spec §312-313).
-        let cow_partuuid: [u8; 16] = current_root[..16].try_into().unwrap();
-        let verity_partuuid: [u8; 16] = current_root[16..32].try_into().unwrap();
+        let data_partuuid: [u8; 16] = current_root[..16].try_into().unwrap();
+        let hash_partuuid: [u8; 16] = current_root[16..32].try_into().unwrap();
 
-        if !visited.insert(verity_partuuid) {
+        if !visited.insert(hash_partuuid) {
             return Err(CarapaceError::ChainWalkFailed {
                 depth: scutes_top_down.len(),
                 reason: format!(
-                    "cycle: verity PARTUUID {} revisited",
-                    crate::util::hex_lower(&verity_partuuid)
+                    "cycle: hash PARTUUID {} revisited",
+                    crate::util::hex_lower(&hash_partuuid)
                 ),
             });
         }
 
-        let (verity, sb_bytes) = resolver
-            .resolve_verity(&verity_partuuid)
-            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "verity"))?;
-        let cow = resolver
-            .resolve_cow(&cow_partuuid)
-            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "cow"))?;
+        let (hash, sb_bytes) = resolver
+            .resolve_hash(&hash_partuuid)
+            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "hash"))?;
+        let data = resolver
+            .resolve_data(&data_partuuid)
+            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "data"))?;
 
         let superblock = ValidatedVeritySuperblock::parse(&sb_bytes, scutes_top_down.len())?;
         let digest_size = superblock.algorithm.digest_size();
@@ -188,8 +188,8 @@ pub(crate) fn walk_chain(
         let is_base = superblock.is_base();
 
         scutes_top_down.push(ValidatedScute {
-            cow: cow.dev_ref(),
-            verity: verity.dev_ref(),
+            data: data.dev_ref(),
+            hash: hash.dev_ref(),
             superblock,
             // ValidatedScute.root is owned (Vec<u8>) for the activation
             // path's lifetime; copy out of the stack buffer.
@@ -264,14 +264,14 @@ mod tests {
     }
 
     /// Mock implementation of [`ChainResolver`] backed by an in-memory
-    /// HashMap keyed by raw PARTUUID. `with_verity` registers a verity
-    /// partition + its synthetic superblock; `with_cow` registers a
-    /// cow partition. Lookups for absent PARTUUIDs return
+    /// HashMap keyed by raw PARTUUID. `with_hash` registers a hash
+    /// partition + its synthetic superblock; `with_data` registers a
+    /// data partition. Lookups for absent PARTUUIDs return
     /// [`CarapaceError::PartitionNotFound`].
     #[derive(Default)]
     struct MockResolver {
-        cows: HashMap<[u8; 16], ResolvedPartition>,
-        veritys: HashMap<[u8; 16], (ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])>,
+        datas: HashMap<[u8; 16], ResolvedPartition>,
+        hashes: HashMap<[u8; 16], (ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])>,
     }
 
     impl MockResolver {
@@ -282,30 +282,29 @@ mod tests {
                 minor,
             }
         }
-        fn with_cow(mut self, partuuid: [u8; 16]) -> Self {
-            self.cows.insert(partuuid, Self::part("cow", 0));
+        fn with_data(mut self, partuuid: [u8; 16]) -> Self {
+            self.datas.insert(partuuid, Self::part("data", 0));
             self
         }
-        fn with_verity(mut self, partuuid: [u8; 16], sb: &[u8; VERITY_SUPERBLOCK_SIZE]) -> Self {
-            self.veritys
-                .insert(partuuid, (Self::part("verity", 1), *sb));
+        fn with_hash(mut self, partuuid: [u8; 16], sb: &[u8; VERITY_SUPERBLOCK_SIZE]) -> Self {
+            self.hashes.insert(partuuid, (Self::part("hash", 1), *sb));
             self
         }
     }
 
     impl ChainResolver for MockResolver {
-        fn resolve_cow(&self, p: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError> {
-            self.cows
+        fn resolve_data(&self, p: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError> {
+            self.datas
                 .get(p)
                 .ok_or_else(|| CarapaceError::PartitionNotFound {
                     partuuid: format!("{p:02x?}"),
                 })
         }
-        fn resolve_verity(
+        fn resolve_hash(
             &self,
             p: &[u8; 16],
         ) -> Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE]), CarapaceError> {
-            self.veritys
+            self.hashes
                 .get(p)
                 .map(|(part, sb)| (part, *sb))
                 .ok_or_else(|| CarapaceError::PartitionNotFound {
@@ -314,10 +313,10 @@ mod tests {
         }
     }
 
-    fn root_from(cow: u8, verity: u8) -> [u8; 32] {
+    fn root_from(data: u8, hash: u8) -> [u8; 32] {
         let mut r = [0u8; 32];
-        r[..16].fill(cow);
-        r[16..].fill(verity);
+        r[..16].fill(data);
+        r[16..].fill(hash);
         r
     }
 
@@ -326,8 +325,8 @@ mod tests {
         // Top == base: salt_prefix is 32 zero bytes (the no-parent
         // sentinel).
         let resolver = MockResolver::default()
-            .with_cow([0xAA; 16])
-            .with_verity([0xBB; 16], &synth_sb(32, &[0u8; 32]));
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]));
         let chain = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
         assert_eq!(chain.scutes.len(), 1);
         assert!(chain.scutes[0].superblock.is_base());
@@ -335,15 +334,15 @@ mod tests {
 
     #[test]
     fn walks_two_scute_chain_in_base_to_top_order() {
-        // Top scute's salt[..32] = base's (cow_partuuid || verity_partuuid).
+        // Top scute's salt[..32] = base's (data_partuuid || hash_partuuid).
         let mut top_salt = [0u8; 32];
         top_salt[..16].copy_from_slice(&[0xAA; 16]);
         top_salt[16..32].copy_from_slice(&[0xBB; 16]);
         let resolver = MockResolver::default()
-            .with_cow([0xAA; 16])
-            .with_verity([0xBB; 16], &synth_sb(32, &[0u8; 32]))
-            .with_cow([0xCC; 16])
-            .with_verity([0xDD; 16], &synth_sb(32, &top_salt));
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]))
+            .with_data([0xCC; 16])
+            .with_hash([0xDD; 16], &synth_sb(32, &top_salt));
         let chain = walk_chain(&root_from(0xCC, 0xDD), &resolver).unwrap();
         assert_eq!(chain.scutes.len(), 2);
         assert!(chain.scutes[0].superblock.is_base(), "scutes[0] is base");
@@ -356,29 +355,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_chain_with_missing_verity_partition() {
-        // Cow exists, verity does not.
-        let resolver = MockResolver::default().with_cow([0xAA; 16]);
+    fn rejects_chain_with_missing_hash_partition() {
+        // Data exists, hash does not.
+        let resolver = MockResolver::default().with_data([0xAA; 16]);
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
             Err(CarapaceError::ChainWalkFailed { reason, .. }) => {
-                assert!(
-                    reason.contains("verity partition not found"),
-                    "got: {reason}"
-                );
+                assert!(reason.contains("hash partition not found"), "got: {reason}");
             }
             other => panic!("expected ChainWalkFailed, got {other:?}"),
         }
     }
 
     #[test]
-    fn rejects_chain_with_missing_cow_partition() {
-        // Verity exists, cow does not.
-        let resolver = MockResolver::default().with_verity([0xBB; 16], &synth_sb(32, &[0u8; 32]));
+    fn rejects_chain_with_missing_data_partition() {
+        // Hash exists, data does not.
+        let resolver = MockResolver::default().with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
             Err(CarapaceError::ChainWalkFailed { reason, .. }) => {
-                assert!(reason.contains("cow partition not found"), "got: {reason}");
+                assert!(reason.contains("data partition not found"), "got: {reason}");
             }
             other => panic!("expected ChainWalkFailed, got {other:?}"),
         }
@@ -391,8 +387,8 @@ mod tests {
         self_salt[..16].copy_from_slice(&[0xAA; 16]);
         self_salt[16..32].copy_from_slice(&[0xBB; 16]);
         let resolver = MockResolver::default()
-            .with_cow([0xAA; 16])
-            .with_verity([0xBB; 16], &synth_sb(32, &self_salt));
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb(32, &self_salt));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
             Err(CarapaceError::ChainWalkFailed { reason, .. }) => {
@@ -410,8 +406,8 @@ mod tests {
         // salt_size >= digest_size, so this hits the parser first;
         // either way it's a clean validation failure.
         let resolver = MockResolver::default()
-            .with_cow([0xAA; 16])
-            .with_verity([0xBB; 16], &synth_sb(16, &[0xFF; 16]));
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb(16, &[0xFF; 16]));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         assert!(
             matches!(
@@ -439,8 +435,8 @@ mod tests {
         // sha512 base: salt prefix is 64 zero bytes (sentinel), then
         // optional builder suffix. Trusted root must be 64 bytes.
         let resolver = MockResolver::default()
-            .with_cow([0xAA; 16])
-            .with_verity([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]));
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]));
 
         let mut trusted_root = [0u8; 64];
         trusted_root[..16].fill(0xAA);
@@ -467,8 +463,8 @@ mod tests {
         // trusted_root supplied is only 32 bytes. Walker should refuse
         // before dm-verity activation would silently truncate.
         let resolver = MockResolver::default()
-            .with_cow([0xAA; 16])
-            .with_verity([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]));
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
             Err(CarapaceError::Usage(msg)) => {
@@ -489,14 +485,14 @@ mod tests {
         // surface the depth-limit guard, not loop forever.
         let mut resolver = MockResolver::default();
         for i in 0..MAX_CHAIN_DEPTH as u8 {
-            let cow = [i; 16];
-            let verity = [0x80 + i; 16];
+            let data = [i; 16];
+            let hash = [0x80 + i; 16];
             let mut salt = [0u8; 32];
             salt[..16].fill(i + 1);
             salt[16..32].fill(0x80 + i + 1);
             resolver = resolver
-                .with_cow(cow)
-                .with_verity(verity, &synth_sb(32, &salt));
+                .with_data(data)
+                .with_hash(hash, &synth_sb(32, &salt));
         }
         let mut root = [0u8; 32];
         root[..16].fill(0);
@@ -523,11 +519,11 @@ mod tests {
         top_salt[16..32].copy_from_slice(&[0xBB; 16]);
         let resolver = MockResolver::default()
             // Base — sha512 (mismatch). 64-byte salt with zero prefix.
-            .with_cow([0xAA; 16])
-            .with_verity([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]))
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]))
             // Top — sha256, points at base via top_salt[..32].
-            .with_cow([0xCC; 16])
-            .with_verity([0xDD; 16], &synth_sb_alg("sha256", 32, &top_salt));
+            .with_data([0xCC; 16])
+            .with_hash([0xDD; 16], &synth_sb_alg("sha256", 32, &top_salt));
         let r = walk_chain(&root_from(0xCC, 0xDD), &resolver);
         match r {
             Err(CarapaceError::WhitelistViolation { field, value, .. }) => {

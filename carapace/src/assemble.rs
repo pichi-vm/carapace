@@ -71,7 +71,7 @@ fn activate_one_line(
 /// Read the dm-snapshot persistent header from offset 0 of an
 /// activated dm-verity device and validate it against spec §136 +
 /// §281 (magic / valid / version / chunk_size == 8). Reading THROUGH
-/// the verity device — not directly from the cow partition — means
+/// the verity device — not directly from the data partition — means
 /// the kernel has integrity-checked the bytes before we parse them
 /// (CRITICAL-1's spirit applied to the snapshot header).
 ///
@@ -97,7 +97,7 @@ fn validate_snapshot_header_through_verity(
 /// [`RollbackOnDrop`]; on success the devices are forgotten so the
 /// kernel state outlives this process.
 ///
-/// dm-verity references the cow/verity partition devices by `<maj>:<min>`
+/// dm-verity references the data/hash partition devices by `<maj>:<min>`
 /// (sysfs-published at GPT-partscan time; no udev sync). The chunk_size
 /// is read through each freshly-activated dm-verity device so dm-verity
 /// integrity-checks the bytes the consumer trusts.
@@ -150,8 +150,8 @@ pub(crate) fn assemble_read_stack(
             DmCreateMode::ReadOnly,
             data_sectors,
             TargetSpec::verity(
-                scute.cow,
-                scute.verity,
+                scute.data,
+                scute.hash,
                 scute.superblock.algorithm.name(),
                 scute.superblock.data_blocks,
                 scute.superblock.full_salt(),
@@ -199,8 +199,8 @@ pub(crate) fn assemble_read_stack(
     // specification constant"): the composed device's apparent size is the
     // dm-zero origin's, and any real filesystem is smaller — its tail blocks
     // read as zero from dm-zero. The earlier cap to the top scute's
-    // `data_blocks * 4096` (the cow *blob* size) truncated the device below
-    // the filesystem for sparse cows (e.g. a `pichi import` of a mostly-zero
+    // `data_blocks * 4096` (the data *blob* size) truncated the device below
+    // the filesystem for sparse data files (e.g. a `pichi import` of a mostly-zero
     // image), so `mount` failed; the filesystem self-describes its real size.
     let alias = activate_one_line(
         &mut control,

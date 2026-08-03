@@ -43,24 +43,24 @@ fi
 # --- carapace partition type GUIDs (mirror src/partition.rs's pinned
 #     vectors; the production code resolves by PARTUUID, not by these
 #     type GUIDs, but sgdisk needs them for the fixture's GPT writer) ---
-SCUTE_COW_RAW="11dd804ae1bf4ab398c1f9f48ceedbf1"
-SCUTE_VERITY_RAW="40bb957129724547b5806a8cb13fd7d1"
+SCUTE_DATA_RAW="11dd804ae1bf4ab398c1f9f48ceedbf1"
+SCUTE_HASH_RAW="40bb957129724547b5806a8cb13fd7d1"
 BASE_FLAG_BIT=48
 
 # --- per-layer geometry ---
 # The production assembler sizes the top alias as
-# data_blocks * 4096 bytes (= COW_BYTES). For ext4 mkfs at build time
+# data_blocks * 4096 bytes (= DATA_BYTES). For ext4 mkfs at build time
 # to produce a filesystem that fits in the assembled device, the
-# writable snapshot's apparent size MUST equal COW_BYTES / 512.
-COW_BYTES=$((16*1024*1024))                  # 16 MiB CoW per scute
-LAYER_SECTORS=$((COW_BYTES / 512))           # snapshot/zero apparent size, matches COW
-VERITY_BYTES=$((4*1024*1024))                # 4 MiB verity hash (ample for 16 MiB data)
+# writable snapshot's apparent size MUST equal DATA_BYTES / 512.
+DATA_BYTES=$((16*1024*1024))                  # 16 MiB data per scute
+LAYER_SECTORS=$((DATA_BYTES / 512))           # snapshot/zero apparent size, matches DATA
+HASH_BYTES=$((4*1024*1024))                # 4 MiB hash tree (ample for 16 MiB data)
 GPT_ALIGN=2048                               # 1 MiB partition alignment
 
 # --- partition byte sizes (post-veritysetup we know the verity blob is
 # much smaller than 4 MiB; we pad each partition to the budgeted size) ---
-COW_PART_BYTES="$COW_BYTES"
-VERITY_PART_BYTES="$VERITY_BYTES"
+DATA_PART_BYTES="$DATA_BYTES"
+HASH_PART_BYTES="$HASH_BYTES"
 
 WORK="$(mktemp -d -t carapace-fixture-XXXXXX)"
 PREFIX="cf$$"   # dm name prefix (process-unique)
@@ -105,8 +105,8 @@ print("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x" % (
 PY
 }
 
-COW_TYPE_UUID="$(raw_to_uuid "$SCUTE_COW_RAW")"
-VERITY_TYPE_UUID="$(raw_to_uuid "$SCUTE_VERITY_RAW")"
+DATA_TYPE_UUID="$(raw_to_uuid "$SCUTE_DATA_RAW")"
+HASH_TYPE_UUID="$(raw_to_uuid "$SCUTE_HASH_RAW")"
 
 attach_loop() {
     # echo loop path
@@ -142,15 +142,15 @@ build_ro_stack() {
     dm_create "z" "0 $LAYER_SECTORS zero"
     TOP_RO="/dev/mapper/$PREFIX-z"
     for ((j=0; j<upto; j++)); do
-        local cow_loop="${COW_LOOPS[$j]}"
-        local verity_loop="${VERITY_LOOPS[$j]}"
+        local data_loop="${DATA_LOOPS[$j]}"
+        local hash_loop="${HASH_LOOPS[$j]}"
         local salt="${SALTS[$j]}"
         local root="${ROOTS[$j]}"
         # dm-verity: 1 = version, sha256 = hash, data_block_size=4096,
-        # hash_block_size=4096, num_data_blocks = COW_BYTES/4096,
+        # hash_block_size=4096, num_data_blocks = DATA_BYTES/4096,
         # hash_start_block = 1 (block 0 is superblock).
-        local data_blocks=$((COW_BYTES / 4096))
-        local table="0 $((data_blocks * 8)) verity 1 $cow_loop $verity_loop 4096 4096 $data_blocks 1 sha256 $root $salt"
+        local data_blocks=$((DATA_BYTES / 4096))
+        local table="0 $((data_blocks * 8)) verity 1 $data_loop $hash_loop 4096 4096 $data_blocks 1 sha256 $root $salt"
         dm_create_ro "v$j" "$table"
         # dm-snapshot read-only-style: actually we use the same target;
         # the persistent header on the CoW prevents accidental writes
@@ -174,18 +174,18 @@ teardown_dm() {
     CLEANUP_DM=()
 }
 
-# --- 1. allocate cow + verity files (one pair per scute) ---
-declare -a COW_FILES VERITY_FILES COW_LOOPS VERITY_LOOPS SALTS ROOTS
+# --- 1. allocate data + hash files (one pair per scute) ---
+declare -a DATA_FILES HASH_FILES DATA_LOOPS HASH_LOOPS SALTS ROOTS
 for ((i=0; i<N; i++)); do
-    cf="$WORK/cow$i"
-    vf="$WORK/verity$i"
-    truncate -s "$COW_BYTES" "$cf"
-    truncate -s "$VERITY_BYTES" "$vf"
-    COW_FILES[i]="$cf"
-    VERITY_FILES[i]="$vf"
+    df="$WORK/data$i"
+    hf="$WORK/hash$i"
+    truncate -s "$DATA_BYTES" "$df"
+    truncate -s "$HASH_BYTES" "$hf"
+    DATA_FILES[i]="$df"
+    HASH_FILES[i]="$hf"
 done
 
-echo "[fixture] building $N scutes (layer=$LAYER_SECTORS sectors, cow=$COW_BYTES B)" >&2
+echo "[fixture] building $N scutes (layer=$LAYER_SECTORS sectors, data=$DATA_BYTES B)" >&2
 
 # --- 2. build each scute bottom-up ---
 MNT="$WORK/mnt"
@@ -193,15 +193,15 @@ mkdir "$MNT"
 for ((i=0; i<N; i++)); do
     echo "[fixture] scute $i: building..." >&2
 
-    # 2a. attach this scute's CoW as a loop dev
-    cow_loop="$(attach_loop "${COW_FILES[$i]}")"
-    COW_LOOPS[i]="$cow_loop"
+    # 2a. attach this scute's data file as a loop dev
+    data_loop="$(attach_loop "${DATA_FILES[$i]}")"
+    DATA_LOOPS[i]="$data_loop"
 
     # 2b. assemble the read-only stack of the chain so far [0..i-1]
     build_ro_stack "$i"
 
-    # 2c. layer a writable snapshot on top whose CoW is this scute's cow
-    dm_create "w" "0 $LAYER_SECTORS snapshot $TOP_RO $cow_loop P 8"
+    # 2c. layer a writable snapshot on top whose CoW is this scute's data file
+    dm_create "w" "0 $LAYER_SECTORS snapshot $TOP_RO $data_loop P 8"
     snap_w="/dev/mapper/$PREFIX-w"
 
     # 2d. populate the layer
@@ -232,13 +232,13 @@ for ((i=0; i<N; i++)); do
     dmsetup suspend "$PREFIX-w" >/dev/null 2>&1 || true
     teardown_dm
 
-    # The cow loop is no longer in use by dm; detach.
-    losetup -d "$cow_loop"
+    # The data loop is no longer in use by dm; detach.
+    losetup -d "$data_loop"
     # Remove from CLEANUP_LOOPS to avoid double-detach on EXIT.
-    CLEANUP_LOOPS=("${CLEANUP_LOOPS[@]/$cow_loop}")
+    CLEANUP_LOOPS=("${CLEANUP_LOOPS[@]/$data_loop}")
 
     # 2f. compute salt for THIS scute and run veritysetup format on its
-    # populated CoW. Salt = parent root for i>0; deterministic random
+    # populated data file. Salt = parent root for i>0; deterministic random
     # for base.
     if [ "$i" -eq 0 ]; then
         # Base scute: 32 zero bytes (the no-parent sentinel) + 32
@@ -262,7 +262,7 @@ print((zero + suffix).hex())
         --hash-block-size=4096 \
         --format=1 \
         --salt="$salt" \
-        "${COW_FILES[$i]}" "${VERITY_FILES[$i]}")"
+        "${DATA_FILES[$i]}" "${HASH_FILES[$i]}")"
     root="$(awk '/^Root hash:/ { print $3 }' <<<"$out")"
     if [ -z "$root" ]; then
         echo "[fixture] veritysetup format scute $i failed:" >&2
@@ -272,24 +272,24 @@ print((zero + suffix).hex())
     ROOTS[i]="$root"
     echo "[fixture] scute $i root=${root:0:16}..." >&2
 
-    # 2g. Re-attach this scute's cow loop and create its dm-verity dev
+    # 2g. Re-attach this scute's data loop and create its dm-verity dev
     # for use by the NEXT scute's read-only stack rebuild.
-    cow_loop="$(attach_loop "${COW_FILES[$i]}")"
-    COW_LOOPS[i]="$cow_loop"
-    verity_loop="$(attach_loop "${VERITY_FILES[$i]}")"
-    VERITY_LOOPS[i]="$verity_loop"
+    data_loop="$(attach_loop "${DATA_FILES[$i]}")"
+    DATA_LOOPS[i]="$data_loop"
+    hash_loop="$(attach_loop "${HASH_FILES[$i]}")"
+    HASH_LOOPS[i]="$hash_loop"
 done
 
 # --- 3. compute total image size + per-scute partition layout ---
-declare -a COW_START COW_END V_START V_END
+declare -a DATA_START DATA_END H_START H_END
 total_sectors=$GPT_ALIGN
 for ((i=0; i<N; i++)); do
     cs=$total_sectors
-    ce=$(( cs + (COW_PART_BYTES/512) - 1 ))
+    ce=$(( cs + (DATA_PART_BYTES/512) - 1 ))
     vs=$(( ((ce + 1 + GPT_ALIGN - 1) / GPT_ALIGN) * GPT_ALIGN ))
-    ve=$(( vs + (VERITY_PART_BYTES/512) - 1 ))
-    COW_START[i]=$cs;  COW_END[i]=$ce
-    V_START[i]=$vs;    V_END[i]=$ve
+    ve=$(( vs + (HASH_PART_BYTES/512) - 1 ))
+    DATA_START[i]=$cs;  DATA_END[i]=$ce
+    H_START[i]=$vs;    H_END[i]=$ve
     total_sectors=$(( ((ve + 1 + GPT_ALIGN - 1) / GPT_ALIGN) * GPT_ALIGN ))
 done
 total_sectors=$(( ((total_sectors + 64 + 33 + GPT_ALIGN - 1) / GPT_ALIGN) * GPT_ALIGN ))
@@ -298,39 +298,39 @@ total_bytes=$((total_sectors * 512))
 # --- 4. allocate the GPT image and copy each scute's bytes in ---
 truncate -s "$total_bytes" "$IMAGE"
 for ((i=0; i<N; i++)); do
-    dd if="${COW_FILES[$i]}" of="$IMAGE" bs=512 seek="${COW_START[$i]}" \
-        count=$((COW_PART_BYTES/512)) conv=notrunc status=none
-    dd if="${VERITY_FILES[$i]}" of="$IMAGE" bs=512 seek="${V_START[$i]}" \
-        count=$((VERITY_PART_BYTES/512)) conv=notrunc status=none
+    dd if="${DATA_FILES[$i]}" of="$IMAGE" bs=512 seek="${DATA_START[$i]}" \
+        count=$((DATA_PART_BYTES/512)) conv=notrunc status=none
+    dd if="${HASH_FILES[$i]}" of="$IMAGE" bs=512 seek="${H_START[$i]}" \
+        count=$((HASH_PART_BYTES/512)) conv=notrunc status=none
 done
 
 # --- 5. write the GPT via sgdisk ---
 sgdisk --zap-all "$IMAGE" >/dev/null 2>&1 || true
 for ((i=0; i<N; i++)); do
-    cs=${COW_START[$i]}; ce=${COW_END[$i]}
-    vs=${V_START[$i]};   ve=${V_END[$i]}
+    cs=${DATA_START[$i]}; ce=${DATA_END[$i]}
+    vs=${H_START[$i]};   ve=${H_END[$i]}
     root="${ROOTS[$i]}"
-    cow_partuuid="$(raw_to_uuid "${root:0:32}")"
-    verity_partuuid="$(raw_to_uuid "${root:32:32}")"
-    cow_slot=$((i * 2 + 1))
-    verity_slot=$((i * 2 + 2))
+    data_partuuid="$(raw_to_uuid "${root:0:32}")"
+    hash_partuuid="$(raw_to_uuid "${root:32:32}")"
+    data_slot=$((i * 2 + 1))
+    hash_slot=$((i * 2 + 2))
 
     sgdisk \
-        --new="$cow_slot:$cs:$ce" \
-        --typecode="$cow_slot:$COW_TYPE_UUID" \
-        --partition-guid="$cow_slot:$cow_partuuid" \
-        --change-name="$cow_slot:cow$i" \
+        --new="$data_slot:$cs:$ce" \
+        --typecode="$data_slot:$DATA_TYPE_UUID" \
+        --partition-guid="$data_slot:$data_partuuid" \
+        --change-name="$data_slot:data$i" \
         "$IMAGE" >/dev/null
 
     sgdisk \
-        --new="$verity_slot:$vs:$ve" \
-        --typecode="$verity_slot:$VERITY_TYPE_UUID" \
-        --partition-guid="$verity_slot:$verity_partuuid" \
-        --change-name="$verity_slot:verity$i" \
+        --new="$hash_slot:$vs:$ve" \
+        --typecode="$hash_slot:$HASH_TYPE_UUID" \
+        --partition-guid="$hash_slot:$hash_partuuid" \
+        --change-name="$hash_slot:hash$i" \
         "$IMAGE" >/dev/null
 
     if [ "$i" -eq 0 ]; then
-        sgdisk --attributes="$verity_slot:set:$BASE_FLAG_BIT" \
+        sgdisk --attributes="$hash_slot:set:$BASE_FLAG_BIT" \
             "$IMAGE" >/dev/null
     fi
 done

@@ -47,17 +47,17 @@ impl ResolvedPartition {
 /// `&dyn ChainResolver` so unit tests can substitute an in-memory
 /// fake without touching `/sys/class/block` or doing real disk I/O.
 pub(crate) trait ChainResolver {
-    /// Look up the cow partition for a scute. Returns just the
-    /// location info — there's no parser-validated structure on cow
+    /// Look up the data partition for a scute. Returns just the
+    /// location info — there's no parser-validated structure on data
     /// partitions; dm-verity verifies their content at activation
     /// time.
-    fn resolve_cow(&self, partuuid: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError>;
+    fn resolve_data(&self, partuuid: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError>;
 
-    /// Look up the verity partition AND read its 4 KiB superblock
+    /// Look up the hash partition AND read its 4 KiB superblock
     /// area in one call. Tying the I/O to resolution keeps the
     /// walker's I/O surface to a single trait method (and lets the
     /// mock just hand back pre-built bytes).
-    fn resolve_verity(
+    fn resolve_hash(
         &self,
         partuuid: &[u8; 16],
     ) -> Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE]), CarapaceError>;
@@ -142,11 +142,11 @@ impl PartitionMap {
 }
 
 impl ChainResolver for PartitionMap {
-    fn resolve_cow(&self, partuuid: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError> {
+    fn resolve_data(&self, partuuid: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError> {
         self.find(partuuid)
     }
 
-    fn resolve_verity(
+    fn resolve_hash(
         &self,
         partuuid: &[u8; 16],
     ) -> Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE]), CarapaceError> {
@@ -154,7 +154,7 @@ impl ChainResolver for PartitionMap {
         use std::io::Read;
 
         let part = self.find(partuuid)?;
-        // Verity superblock at offset 0 of the verity partition (kernel
+        // Verity superblock at offset 0 of the hash partition (kernel
         // ABI: veritysetup format --format=1 places it there). The
         // superblock is exactly 512 B; we read just that — saves a 4 KiB
         // stack copy on the resolver return path and 8x the read I/O.
@@ -275,25 +275,25 @@ mod tests {
 
     #[test]
     fn raw_to_text_round_trips_through_known_vectors() {
-        // Two random v4 GUIDs (the carapace-cow and carapace-verity
+        // Two random v4 GUIDs (the carapace-data and carapace-hash
         // partition type GUIDs from tests/fixtures/build_carapace.sh).
         // Pinned here as the canonical mixed-endian witness — if a
         // future contributor "fixes" the byte order in raw_to_text,
         // these assertions catch it.
-        let scute_cow_raw: [u8; 16] = [
+        let scute_data_raw: [u8; 16] = [
             0x11, 0xdd, 0x80, 0x4a, 0xe1, 0xbf, 0x4a, 0xb3, 0x98, 0xc1, 0xf9, 0xf4, 0x8c, 0xee,
             0xdb, 0xf1,
         ];
         assert_eq!(
-            raw_partuuid_to_text(&scute_cow_raw),
+            raw_partuuid_to_text(&scute_data_raw),
             "4a80dd11-bfe1-b34a-98c1-f9f48ceedbf1"
         );
-        let scute_verity_raw: [u8; 16] = [
+        let scute_hash_raw: [u8; 16] = [
             0x40, 0xbb, 0x95, 0x71, 0x29, 0x72, 0x45, 0x47, 0xb5, 0x80, 0x6a, 0x8c, 0xb1, 0x3f,
             0xd7, 0xd1,
         ];
         assert_eq!(
-            raw_partuuid_to_text(&scute_verity_raw),
+            raw_partuuid_to_text(&scute_hash_raw),
             "7195bb40-7229-4745-b580-6a8cb13fd7d1"
         );
     }
