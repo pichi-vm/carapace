@@ -76,10 +76,8 @@ impl ValidatedVeritySuperblock {
                 bytes.len()
             )));
         }
-        let raw =
-            RawVeritySuperblock::ref_from_bytes(&bytes[..VERITY_SUPERBLOCK_SIZE]).map_err(|_| {
-                invalid_data("superblock: alignment / size".into())
-            })?;
+        let raw = RawVeritySuperblock::ref_from_bytes(&bytes[..VERITY_SUPERBLOCK_SIZE])
+            .map_err(|_| invalid_data("superblock: alignment / size".into()))?;
 
         if raw.signature != VERITY_SIGNATURE {
             return Err(invalid_data(format!(
@@ -118,7 +116,9 @@ impl ValidatedVeritySuperblock {
         let alg_str = cstr_to_str(&raw.algorithm)
             .map_err(|e| invalid_data(format!("superblock: algorithm field: {e}")))?;
         let algorithm = algorithm::parse(alg_str).map_err(|_| {
-            invalid_data(format!("whitelist: algorithm = {alg_str} (not whitelisted)"))
+            invalid_data(format!(
+                "whitelist: algorithm = {alg_str} (not whitelisted)"
+            ))
         })?;
         let digest_size = algorithm.digest_size();
 
@@ -138,9 +138,7 @@ impl ValidatedVeritySuperblock {
 
         let data_blocks = raw.data_blocks.get();
         if data_blocks == 0 {
-            return Err(invalid_data(
-                "superblock: data_blocks must be > 0".into(),
-            ));
+            return Err(invalid_data("superblock: data_blocks must be > 0".into()));
         }
         if data_blocks
             .checked_mul(RDP_DATA_BLOCK_SIZE as u64)

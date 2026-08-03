@@ -28,9 +28,11 @@ loop = ["dep:lodown"]
 # stack. Matches the corium/conglobate pattern.
 [target.'cfg(target_os = "linux")'.dependencies]
 # Safe device-mapper wrapper (all dm unsafe lives here, not in carapace).
-devmap = { path = "../../devmap" }
+# Pinned to the revision that adds `TableBuilder::read_only` (required by
+# dm-verity); repoint to a tag/main once that lands on devmap's main.
+devmap = { git = "https://github.com/pichi-vm/devmap.git", rev = "6a688a59a162da2b5a9bb33d1611a23550aa2df6" }
 # Safe loop-device wrapper for file-backed layers (feature `loop`).
-lodown = { path = "../../loopdev", optional = true }
+lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "89913b80fd795c8f7211ae6b4d39b70845b87974", optional = true }
 # zerocopy for the verity superblock / snapshot header struct parsing.
 zerocopy = { workspace = true }
 

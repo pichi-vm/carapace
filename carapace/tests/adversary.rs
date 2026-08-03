@@ -57,8 +57,7 @@ fn is_root() -> bool {
 /// GPT walk never reach assemble; scenarios that fail during assemble
 /// (re-validation) do. Both are expected to be `InvalidData`.
 fn try_assemble(root_hex: &str) -> io::Result<carapace::Removed> {
-    let bytes = decode_hex(root_hex)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let bytes = decode_hex(root_hex).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let chain = Chain::from_gpt(&bytes)?;
     chain.assemble()
 }
@@ -172,8 +171,7 @@ fn rejects_assemble_with_wrong_trusted_root() {
 
     let _attached = AttachedImage::attach(&chain.image);
 
-    let err = try_assemble(&bad)
-        .expect_err("expected rejection of wrong trusted root");
+    let err = try_assemble(&bad).expect_err("expected rejection of wrong trusted root");
     assert_eq!(
         err.kind(),
         io::ErrorKind::InvalidData,

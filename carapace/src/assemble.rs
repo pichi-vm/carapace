@@ -103,7 +103,10 @@ fn resolve(
             let loop_dev: LoopDevice = detached.into();
             // DevId for loop devices: major=7, minor=number (default max_part=0).
             let id = DevId::new(7, number).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "loop device number out of range")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "loop device number out of range",
+                )
             })?;
             loops.push(loop_dev);
             return Ok(id);
@@ -189,7 +192,12 @@ fn assemble_from(
             ),
         )?
         .load()
-        .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} verity table load: {e}")))?;
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("scute {scute_index} verity table load: {e}"),
+            )
+        })?;
     vi.resume()
         .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} verity resume: {e}")))?;
 
@@ -212,9 +220,18 @@ fn assemble_from(
             Snapshot::new(origin.id(), vi.id(), 8),
         )?
         .load()
-        .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} snapshot table load: {e}")))?;
-    si.resume()
-        .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} snapshot resume: {e}")))?;
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("scute {scute_index} snapshot table load: {e}"),
+            )
+        })?;
+    si.resume().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("scute {scute_index} snapshot resume: {e}"),
+        )
+    })?;
 
     // `origin` (dm-zero or lower snapshot) and `vi` (verity) drop here.
     // Removed::drop issues DM_DEFERRED_REMOVE; they're busy (si holds them),
@@ -231,12 +248,10 @@ pub(crate) fn assemble(layers: &[Layer], root: &[u8]) -> io::Result<Removed> {
     #[cfg(not(feature = "loop"))]
     let mut loops: Vec<()> = Vec::new();
 
-    let result = assemble_from(layers, root, &ctl, &mut loops);
-
-    // `loops` (the file-backed layers' loop handles) stays alive until here,
-    // so every loop fd remained open across all the resumes above. Dropping
-    // it now closes those fds, but each loop is still held by its resumed
-    // dm-verity device, so nothing detaches until the chain is torn down —
-    // at which point LO_FLAGS_AUTOCLEAR releases each backing file.
-    result
+    // `loops` (the file-backed layers' loop handles) must outlive every resume
+    // in the recursion, so it stays in scope until this call returns. It then
+    // drops (closing the fds), but each loop is still held by its resumed
+    // dm-verity device, so nothing detaches until the chain is torn down — at
+    // which point LO_FLAGS_AUTOCLEAR releases each backing file.
+    assemble_from(layers, root, &ctl, &mut loops)
 }

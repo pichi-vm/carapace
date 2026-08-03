@@ -86,12 +86,15 @@ impl PartitionMap {
 
     /// Look up a partition by raw 16-byte PARTUUID.
     pub(crate) fn find(&self, partuuid: &[u8; 16]) -> io::Result<&ResolvedPartition> {
-        self.by_partuuid
-            .get(partuuid)
-            .ok_or_else(|| io::Error::new(
+        self.by_partuuid.get(partuuid).ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("partition not found: PARTUUID {}", raw_partuuid_to_text(partuuid)),
-            ))
+                format!(
+                    "partition not found: PARTUUID {}",
+                    raw_partuuid_to_text(partuuid)
+                ),
+            )
+        })
     }
 }
 

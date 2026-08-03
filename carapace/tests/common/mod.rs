@@ -92,8 +92,7 @@ fn wait_for_partitions(loop_path: &Path) {
             })
             .filter(|e| {
                 std::fs::read_to_string(e.path().join("uevent"))
-                    .map(|s| s.contains("PARTUUID="))
-                    .unwrap_or(false)
+                    .is_ok_and(|s| s.contains("PARTUUID="))
             })
             .count()
     };
@@ -209,8 +208,7 @@ pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
 
 /// Decode `root_hex` and call `Chain::from_gpt(&bytes)?.assemble()`.
 pub(crate) fn assemble_from_hex(root_hex: &str) -> io::Result<Removed> {
-    let bytes = decode_hex(root_hex)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let bytes = decode_hex(root_hex).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     Chain::from_gpt(&bytes)?.assemble()
 }
 

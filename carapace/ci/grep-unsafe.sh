@@ -2,37 +2,31 @@
 # SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-# CI gate: `unsafe` keyword permitted only in src/dm/uapi.rs (iocuddle
-# ioctl-number declarations) and src/boot/sys.rs (initramfs-init raw syscalls:
-# mount/finit_module/switch_root/reboot). Comment-only lines are exempt (we
-# discuss `unsafe` in module docstrings).
+# CI gate: carapace contains NO `unsafe` — all of it lives in the devmap /
+# lodown substrate crates. The crate root already sets
+# `#![forbid(unsafe_code)]`; this grep is defense-in-depth against a future
+# contributor flipping that attribute. Comment-only lines are exempt (module
+# docstrings discuss `unsafe`).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-GREP=rg
-if ! command -v rg >/dev/null 2>&1; then
-    GREP="grep -RnE"
-fi
-
-if [ "$GREP" = "rg" ]; then
+if command -v rg >/dev/null 2>&1; then
     matches=$(rg --line-number --type rust '\bunsafe\b' src/ \
         | grep -vE ':\s*//' \
         | grep -vE '\s*//.*\bunsafe\b' \
-        | grep -vE '^src/(dm/uapi|boot/sys)\.rs:' \
         || true)
 else
     matches=$(grep -RnE '\bunsafe\b' src/ \
         | grep -vE ':\s*//' \
         | grep -vE '\s*//.*\bunsafe\b' \
-        | grep -vE '^src/(dm/uapi|boot/sys)\.rs:' \
         || true)
 fi
 
 if [ -n "$matches" ]; then
-    echo "FAIL: unsafe keyword outside src/dm/uapi.rs and src/boot/sys.rs:" >&2
+    echo "FAIL: unsafe keyword found in carapace src/ (all unsafe belongs in devmap/lodown):" >&2
     echo "$matches" >&2
     exit 1
 fi
 
-echo "OK: unsafe boundary intact (only src/dm/uapi.rs and src/boot/sys.rs)"
+echo "OK: carapace src/ is unsafe-free"

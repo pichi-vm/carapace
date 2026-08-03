@@ -24,6 +24,12 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 [sources]
-# carapace depends only on crates.io packages.
+# carapace depends on crates.io packages plus the pichi-vm substrate crates
+# (devmap/lodown) pulled directly from their GitHub repos.
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# Allow git dependencies from the pichi-vm org (devmap, lodown). Pinned to a
+# rev in Cargo.toml; the org allowlist keeps any other git source denied.
+[sources.allow-org]
+github = ["pichi-vm"]

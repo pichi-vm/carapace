@@ -83,8 +83,7 @@ pub(crate) fn walk_chain(
             .resolve_data(&data_partuuid)
             .map_err(|e| wrap_partition_not_found(e, layers_top_down.len(), "data"))?;
 
-        let superblock =
-            ValidatedVeritySuperblock::parse(&sb_bytes, layers_top_down.len())?;
+        let superblock = ValidatedVeritySuperblock::parse(&sb_bytes, layers_top_down.len())?;
         let digest_size = superblock.algorithm.digest_size();
 
         match chain_algo {
@@ -268,7 +267,10 @@ mod tests {
         match r {
             Err(e) => {
                 assert_eq!(e.kind(), io::ErrorKind::InvalidData, "got: {e}");
-                assert!(e.to_string().contains("hash partition not found"), "got: {e}");
+                assert!(
+                    e.to_string().contains("hash partition not found"),
+                    "got: {e}"
+                );
             }
             other => panic!("expected Err, got {other:?}"),
         }
@@ -281,7 +283,10 @@ mod tests {
         match r {
             Err(e) => {
                 assert_eq!(e.kind(), io::ErrorKind::InvalidData, "got: {e}");
-                assert!(e.to_string().contains("data partition not found"), "got: {e}");
+                assert!(
+                    e.to_string().contains("data partition not found"),
+                    "got: {e}"
+                );
             }
             other => panic!("expected Err, got {other:?}"),
         }

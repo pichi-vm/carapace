@@ -115,12 +115,12 @@ fn parse_and_dispatch(mut args: impl Iterator<Item = String>) -> io::Result<()> 
 
 #[cfg(feature = "gpt")]
 fn parse_mount(mut args: impl Iterator<Item = String>) -> io::Result<MountArgs> {
-    let root_hex = args.next().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "mount: missing <root-hex>")
-    })?;
-    let dir = args.next().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "mount: missing <dir>")
-    })?;
+    let root_hex = args
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "mount: missing <root-hex>"))?;
+    let dir = args
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "mount: missing <dir>"))?;
     let mut fstype: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
