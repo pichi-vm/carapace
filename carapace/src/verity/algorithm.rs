@@ -5,10 +5,10 @@
 //! whitelist: `sha256` (REQUIRED) + `sha512` (OPTIONAL).
 //!
 //! No `Default` impl — an unknown algorithm string is always
-//! [`CarapaceError::UnsupportedAlgorithm`], never a silent fallback
+//! `io::ErrorKind::InvalidData`, never a silent fallback
 //! (PITFALLS CRITICAL-7 prevention).
 
-use crate::CarapaceError;
+use std::io;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Algorithm {
@@ -24,8 +24,7 @@ impl Algorithm {
         }
     }
 
-    /// Digest size in bytes. With sha384/sha3 dropped from the v1
-    /// whitelist, `digest_size == slot_size` is now an invariant.
+    /// Digest size in bytes.
     pub(crate) fn digest_size(self) -> usize {
         match self {
             Self::Sha256 => 32,
@@ -36,11 +35,14 @@ impl Algorithm {
 
 /// Parse an algorithm name as written in the verity superblock.
 /// NUL trimming is the caller's responsibility.
-pub(crate) fn parse(name: &str) -> Result<Algorithm, CarapaceError> {
+pub(crate) fn parse(name: &str) -> io::Result<Algorithm> {
     match name {
         "sha256" => Ok(Algorithm::Sha256),
         "sha512" => Ok(Algorithm::Sha512),
-        other => Err(CarapaceError::UnsupportedAlgorithm(other.to_string())),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported algorithm: {other}"),
+        )),
     }
 }
 
@@ -59,10 +61,12 @@ mod tests {
         for n in [
             "", "md5", "sha1", "sha224", "sha384", "sha3-256", "blake3", "sha2",
         ] {
-            assert!(matches!(
-                parse(n),
-                Err(CarapaceError::UnsupportedAlgorithm(_))
-            ));
+            let e = parse(n).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                io::ErrorKind::InvalidData,
+                "{n} should be rejected with InvalidData"
+            );
         }
     }
 

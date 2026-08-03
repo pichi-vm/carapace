@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 repository.workspace = true
-description = "Assemble carapace block-device chains (read) and import raw images into carapace OCI artifacts (produce)."
+description = "Assemble carapace block-device chains into a read-only device."
 
 [lints]
 workspace = true
@@ -14,18 +14,24 @@ workspace = true
 name = "carapace"
 path = "src/main.rs"
 
-# carapace is Linux-only: its whole library and CLI are #![cfg(target_os =
-# "linux")] (it drives device-mapper). Gate the deps to Linux too, so a consumer
-# that pulls the lib on another target resolves it to an empty crate instead of
-# compiling the Linux-only ioctl stack (iocuddle has no std::os::unix on
-# Windows). Matches the corium/conglobate pattern.
+[features]
+default = ["gpt"]
+# GPT/PARTUUID discovery: `Chain::from_gpt` scans block-device PARTUUIDs.
+gpt = []
+# File-backed layers: loop-attach `data`/`hash` files via lodown. corium is
+# block-only and can omit this.
+loop = ["dep:lodown"]
+
+# carapace is Linux-only: the whole library and CLI drive device-mapper. Gate
+# the deps to Linux too, so a consumer that pulls the lib on another target
+# resolves it to an empty crate instead of compiling the Linux-only ioctl
+# stack. Matches the corium/conglobate pattern.
 [target.'cfg(target_os = "linux")'.dependencies]
-# device-mapper ioctl declarations for the vendored `dm` module (src/dm/uapi.rs).
-iocuddle = "0.2"
-# raw syscalls for the initramfs init mode (mount / finit_module / switch_root /
-# reboot) — confined to the allow(unsafe_code) boundary in src/boot/sys.rs.
-libc = "0.2"
-thiserror = { workspace = true }
+# Safe device-mapper wrapper (all dm unsafe lives here, not in carapace).
+devmap = { path = "../../devmap" }
+# Safe loop-device wrapper for file-backed layers (feature `loop`).
+lodown = { path = "../../loopdev", optional = true }
+# zerocopy for the verity superblock / snapshot header struct parsing.
 zerocopy = { workspace = true }
 
 [dev-dependencies]

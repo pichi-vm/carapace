@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end attach + detach against a real layered ext4 fixture.
+//! End-to-end assemble + mount + teardown against a real layered ext4 fixture.
 //!
 //! Each test:
 //!   1. Builds a fixture via `common::build_chain` (shell pipeline:
@@ -9,12 +9,12 @@
 //!      — no production-crate code is reused on the producer side).
 //!   2. `losetup --partscan` the image (kernel populates
 //!      `/sys/class/block/loopXpY/uevent` with PARTUUIDs synchronously).
-//!   3. Runs `carapace attach --name=... --root=...` (no --storage —
-//!      partition discovery is sysfs-driven).
-//!   4. Mounts /dev/mapper/<name> read-only as ext4 and verifies the
-//!      expected per-scute files exist with the right content (proves
-//!      cross-layer composition end to end, not just byte parsing).
-//!   5. Runs `carapace detach --name=...`.
+//!   3. Calls `carapace::Chain::from_gpt(&bytes)?.assemble()` (library API).
+//!   4. Mounts `/dev/dm-{minor}` read-only and verifies the expected
+//!      per-scute files exist with the right content (proves cross-layer
+//!      composition end to end, not just byte parsing).
+//!   5. Unmounts, then drops the `Removed` guard — DM_DEFERRED_REMOVE
+//!      cascades the teardown.
 //!   6. Drops `AttachedImage` → `losetup -d`. Verifies the image is no
 //!      longer loop-bound.
 //!
@@ -24,14 +24,16 @@
 
 mod common;
 
-use assert_cmd_lite::Carapace;
-use common::{build_chain, cleanup_dm, loop_bound_to, with_mounted, AttachedImage};
+use common::{
+    assemble_from_hex, build_chain, carapace_devices_present, cleanup_dm, loop_bound_to,
+    with_mounted, AttachedImage,
+};
 use serial_test::serial;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
 
-fn root() -> bool {
+fn is_root() -> bool {
     match std::fs::read_to_string("/proc/self/status") {
         Ok(s) => s.lines().any(|l| {
             l.strip_prefix("Uid:")
@@ -42,45 +44,39 @@ fn root() -> bool {
     }
 }
 
-fn name_for(test: &str) -> String {
-    format!("carapace-test-{}-{}", test, std::process::id())
-}
-
-/// Run the full attach -> mount -> verify -> umount -> detach loop and
+/// Run the full assemble -> mount -> verify -> umount -> drop loop and
 /// assert that every per-scute file is visible at the expected content.
-fn attach_mount_verify_detach(test_label: &str, n_scutes: usize) {
-    if !root() {
+fn assemble_mount_verify_teardown(test_label: &str, n_scutes: usize) {
+    if !is_root() {
         eprintln!("skip: requires root");
         return;
     }
     let dir = TempDir::new().unwrap();
     let img = dir.path().join(format!("{test_label}.img"));
     let chain = build_chain(&img, n_scutes);
-    let name = name_for(test_label);
-    cleanup_dm(&name);
+
+    // Pre-test cleanup of any leftover CARAPACE-* devices.
+    cleanup_dm();
 
     // losetup --partscan exposes the image's GPT partitions to the
-    // kernel; sysfs gets PARTUUID entries synchronously. carapace
-    // attach discovers them from /sys/class/block.
+    // kernel; sysfs gets PARTUUID entries synchronously. Chain::from_gpt
+    // discovers them from /sys/class/block.
     let attached = AttachedImage::attach(&chain.image);
 
-    let mapper = Carapace::attach(&name, &chain.trusted_root_hex);
-    let mapper_str = mapper.to_string_lossy();
-    assert_eq!(
-        mapper_str,
-        format!("/dev/mapper/{name}"),
-        "attach should print the operator-visible /dev/mapper/<name> path, got {mapper_str}"
-    );
+    let removed = assemble_from_hex(&chain.trusted_root_hex)
+        .unwrap_or_else(|e| panic!("assemble failed: {e}"));
+
+    let minor = removed.id().minor();
+    let dev_path = PathBuf::from(format!("/dev/dm-{minor}"));
     assert!(
-        mapper.exists(),
-        "{} must exist after attach",
-        mapper.display()
+        dev_path.exists(),
+        "{} must exist after assemble",
+        dev_path.display()
     );
 
-    // Mount the assembled device read-only as ext4 and verify per-scute
-    // files. This exercises the full layered composition, not just the
-    // GPT/verity/snapshot byte parsing.
-    with_mounted(&mapper, |mnt| {
+    // Mount the assembled device read-only and verify per-scute files.
+    // This exercises the full layered composition, not just byte parsing.
+    with_mounted(&dev_path, |mnt| {
         for (filename, expected) in chain.expected_files() {
             let path = mnt.join(&filename);
             let actual = std::fs::read_to_string(&path)
@@ -89,78 +85,36 @@ fn attach_mount_verify_detach(test_label: &str, n_scutes: usize) {
         }
     });
 
-    Carapace::detach(&name);
-    assert!(!PathBuf::from(format!("/dev/mapper/{name}")).exists());
+    // Drop the Removed guard: DM_DEFERRED_REMOVE cascades the teardown.
+    drop(removed);
+
+    // Wait for the chain to tear down.
+    assert!(
+        !carapace_devices_present(Duration::from_secs(5)),
+        "CARAPACE-* devices must be gone after dropping the Removed guard"
+    );
+
     drop(attached); // losetup -d
     assert!(
         !loop_bound_to(&chain.image, Duration::from_secs(2)),
-        "no loop must be bound to image after detach"
+        "no loop must be bound to image after teardown"
     );
 }
 
 #[test]
 #[serial]
-fn attach_then_detach_one_scute_chain() {
-    attach_mount_verify_detach("one", 1);
+fn assemble_then_teardown_one_scute_chain() {
+    assemble_mount_verify_teardown("one", 1);
 }
 
 #[test]
 #[serial]
-fn attach_then_detach_two_scute_chain() {
-    attach_mount_verify_detach("two", 2);
+fn assemble_then_teardown_two_scute_chain() {
+    assemble_mount_verify_teardown("two", 2);
 }
 
 #[test]
 #[serial]
-fn attach_then_detach_three_scute_chain() {
-    attach_mount_verify_detach("three", 3);
-}
-
-// ----- Inline command runner — no assert_cmd dep -----
-
-mod assert_cmd_lite {
-    use std::path::PathBuf;
-    use std::process::Command;
-
-    pub(crate) struct Carapace;
-    impl Carapace {
-        fn binary() -> PathBuf {
-            // Prefer CARGO_BIN_EXE_carapace if set (cargo test injects it).
-            if let Some(p) = std::env::var_os("CARGO_BIN_EXE_carapace") {
-                return PathBuf::from(p);
-            }
-            // Fallback: assume target/debug/carapace.
-            let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            p.push("target/debug/carapace");
-            p
-        }
-
-        pub(crate) fn attach(name: &str, root_hex: &str) -> PathBuf {
-            let out = Command::new(Self::binary())
-                .args(["attach", "--name", name, "--root", root_hex])
-                .output()
-                .expect("spawn carapace attach");
-            assert!(
-                out.status.success(),
-                "carapace attach failed: status={:?} stderr=<<<{}>>>",
-                out.status,
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            PathBuf::from(stdout)
-        }
-
-        pub(crate) fn detach(name: &str) {
-            let out = Command::new(Self::binary())
-                .args(["detach", "--name", name])
-                .output()
-                .expect("spawn carapace detach");
-            assert!(
-                out.status.success(),
-                "carapace detach failed: status={:?} stderr=<<<{}>>>",
-                out.status,
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-    }
+fn assemble_then_teardown_three_scute_chain() {
+    assemble_mount_verify_teardown("three", 3);
 }

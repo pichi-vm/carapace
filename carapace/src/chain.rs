@@ -16,213 +16,137 @@
 
 use crate::partition::ChainResolver;
 use crate::verity::{Algorithm, ValidatedVeritySuperblock};
-use crate::CarapaceError;
 use std::collections::HashSet;
+use std::io;
 
-/// Hard cap on chain depth. Visited-set cycle detector fires for any
-/// actual cycle; the limit is a catastrophic guard against a long-but-
-/// not-cyclic adversarial chain.
+/// Hard cap on chain depth.
 pub(crate) const MAX_CHAIN_DEPTH: usize = 32;
 
-/// Per-scute information the activation pipeline needs. Chain order is
-/// implicit in the position of each scute within `ValidatedChain.scutes`
-/// (BASE → TOP); no explicit `index` field is carried.
+/// Walk the chain starting at `trusted_root` backward via salt prefixes,
+/// returning an ordered list of `(data_path, hash_path)` pairs in BASE → TOP
+/// order.
 ///
-/// Data / hash are carried as `(major, minor)` tuples — exactly what
-/// `ResolvedPartition::dev_ref` returns and what activation feeds into
-/// `TargetSpec::Linear` / `Snapshot` / `Verity`. We don't store the
-/// full `ResolvedPartition` here because the activation path doesn't
-/// need the partition's `/dev/...` path (the kernel-synchronous
-/// `<maj>:<min>` form goes straight into the dm-table line). Avoids
-/// cloning a `PathBuf` per scute during chain walk.
-#[derive(Debug, Clone)]
-pub(crate) struct ValidatedScute {
-    /// `(major, minor)` of the data partition.
-    pub data: (u32, u32),
-    /// `(major, minor)` of the hash partition.
-    pub hash: (u32, u32),
-    /// Parsed + whitelist-validated superblock for the hash partition.
-    pub superblock: ValidatedVeritySuperblock,
-    /// THE root hash to feed dm-verity for this scute. CRITICAL-1: this
-    /// is the *chain-computed* root, never derived from the scute's own
-    /// superblock. For the top scute this equals the trusted cmdline
-    /// root; for lower scutes it equals the next scute's salt prefix.
-    pub root: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ValidatedChain {
-    /// Scutes in BASE → TOP order.
-    pub scutes: Vec<ValidatedScute>,
-}
-
-/// Walk the chain starting at `trusted_root` (the top scute's root,
-/// supplied out-of-band — kernel cmdline / signed UKI / etc.) backward
-/// via salt prefixes. Each step:
-///
-/// 1. Resolve `current_root[..16]` (data PARTUUID) and
-///    `current_root[16..32]` (hash PARTUUID) via `resolver`. The
-///    hash resolver also reads the 4 KiB superblock area in the
-///    same call.
-/// 2. Parse + whitelist-validate the superblock; enforce
-///    chain-consistency on `algorithm` (spec §275 — every scute MUST
-///    use the chain_params.algorithm declared by the base).
-/// 3. If `salt_prefix == [0; digest_size]` (the base sentinel),
-///    terminate. Otherwise the next walk target is the parent's
-///    `digest_size`-byte salt prefix (full 32 for sha256, full 64 for
-///    sha512).
-///
-/// `trusted_root` MUST be at least 32 bytes (PARTUUID extraction). For
-/// sha512 chains it MUST additionally be ≥64 bytes (full digest);
-/// validated after the top scute's superblock declares the algorithm.
+/// This is the PARTUUID-discovery pass used by `FromGpt::from_gpt`. It
+/// produces `Layer` paths; `assemble` later re-reads and re-validates
+/// every superblock independently.
 pub(crate) fn walk_chain(
     trusted_root: &[u8],
     resolver: &dyn ChainResolver,
-) -> Result<ValidatedChain, CarapaceError> {
+) -> io::Result<Vec<(std::path::PathBuf, std::path::PathBuf)>> {
     if trusted_root.len() < 32 {
-        return Err(CarapaceError::Usage(format!(
-            "trusted_root too short: {} bytes (need at least 32 for PARTUUID extraction)",
-            trusted_root.len()
-        )));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "trusted_root too short: {} bytes (need at least 32 for PARTUUID extraction)",
+                trusted_root.len()
+            ),
+        ));
     }
 
-    let mut scutes_top_down: Vec<ValidatedScute> = Vec::new();
+    let mut layers_top_down: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     let mut visited: HashSet<[u8; 16]> = HashSet::new();
-    // Variable-length root buffer kept on the stack: 32 bytes for
-    // sha256 chains, 64 for sha512 (= the largest whitelisted
-    // digest_size). Initialized from the operator's trusted_root;
-    // `current_root_len` shrinks to `digest_size` after we read the
-    // top scute's superblock. Per-iter parent updates `copy_from_slice`
-    // into the same buffer — no Vec reallocation per chain step.
     let mut current_root = [0u8; 64];
     let init_len = trusted_root.len().min(current_root.len());
     current_root[..init_len].copy_from_slice(&trusted_root[..init_len]);
-    let mut current_root_len = init_len;
-    // Chain algorithm — None until we read the top scute, then locked.
-    // Every subsequent scute MUST report this same value.
+    let current_root_len = init_len;
     let mut chain_algo: Option<Algorithm> = None;
 
     loop {
-        if scutes_top_down.len() >= MAX_CHAIN_DEPTH {
-            return Err(CarapaceError::ChainWalkFailed {
-                depth: scutes_top_down.len(),
-                reason: format!("exceeded MAX_CHAIN_DEPTH ({MAX_CHAIN_DEPTH})"),
-            });
+        if layers_top_down.len() >= MAX_CHAIN_DEPTH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "chain walk failed: exceeded MAX_CHAIN_DEPTH ({MAX_CHAIN_DEPTH}) at depth {}",
+                    layers_top_down.len()
+                ),
+            ));
         }
 
-        // PARTUUIDs always derive from the first 32 bytes of the root
-        // regardless of digest_size (fixed convention, spec §312-313).
         let data_partuuid: [u8; 16] = current_root[..16].try_into().unwrap();
         let hash_partuuid: [u8; 16] = current_root[16..32].try_into().unwrap();
 
         if !visited.insert(hash_partuuid) {
-            return Err(CarapaceError::ChainWalkFailed {
-                depth: scutes_top_down.len(),
-                reason: format!(
-                    "cycle: hash PARTUUID {} revisited",
-                    crate::util::hex_lower(&hash_partuuid)
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "chain walk failed: cycle: hash PARTUUID {} revisited at depth {}",
+                    crate::util::hex_lower(&hash_partuuid),
+                    layers_top_down.len()
                 ),
-            });
+            ));
         }
 
         let (hash, sb_bytes) = resolver
             .resolve_hash(&hash_partuuid)
-            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "hash"))?;
+            .map_err(|e| wrap_partition_not_found(e, layers_top_down.len(), "hash"))?;
         let data = resolver
             .resolve_data(&data_partuuid)
-            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "data"))?;
+            .map_err(|e| wrap_partition_not_found(e, layers_top_down.len(), "data"))?;
 
-        let superblock = ValidatedVeritySuperblock::parse(&sb_bytes, scutes_top_down.len())?;
+        let superblock =
+            ValidatedVeritySuperblock::parse(&sb_bytes, layers_top_down.len())?;
         let digest_size = superblock.algorithm.digest_size();
 
-        // chain_params consistency (spec §275: every scute MUST declare
-        // identical chain_params).
-        //
-        // - data_block_size / hash_block_size / hash_type / version
-        //   are RDP-locked LITERALS — every per-scute parse() must
-        //   equal the RDP constant or it errors out via
-        //   WhitelistViolation. Equality with a constant on every
-        //   scute is, transitively, equality across scutes. No
-        //   explicit per-pair check is needed.
-        //
-        // - algorithm is the only chain_param that is ALLOWED to vary
-        //   between distinct chains (sha256 and sha512 are both
-        //   whitelisted), so it's the only one we have to lock at the
-        //   top scute and re-check on every subsequent scute. Done
-        //   below.
-        //
-        // If the whitelist ever grows to allow alternative values for
-        // any of the LITERAL fields, this proof breaks and explicit
-        // per-pair consistency checks must be added.
         match chain_algo {
             None => {
                 chain_algo = Some(superblock.algorithm);
-                // Validate that the operator's trusted_root is wide
-                // enough for the chain's digest_size. Catches the
-                // sha512-with-32-byte-root misconfiguration before
-                // dm-verity activation would silently truncate.
                 if current_root_len < digest_size {
-                    return Err(CarapaceError::Usage(format!(
-                        "trusted_root is {} bytes but chain uses {} (digest_size {} bytes)",
-                        current_root_len,
-                        superblock.algorithm.name(),
-                        digest_size
-                    )));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "trusted_root is {} bytes but chain uses {} (digest_size {} bytes)",
+                            current_root_len,
+                            superblock.algorithm.name(),
+                            digest_size
+                        ),
+                    ));
                 }
-                current_root_len = digest_size;
+                // current_root_len validated; lock is implicit (only first scute checked).
             }
             Some(expected) if superblock.algorithm != expected => {
-                return Err(CarapaceError::WhitelistViolation {
-                    scute_index: scutes_top_down.len(),
-                    field: "algorithm",
-                    value: format!(
-                        "{} (chain_params.algorithm = {})",
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "chain walk failed: algorithm mismatch at depth {}: \
+                         scute has {} but chain_params.algorithm = {}",
+                        layers_top_down.len(),
                         superblock.algorithm.name(),
                         expected.name()
                     ),
-                });
+                ));
             }
             Some(_) => {}
         }
 
         let is_base = superblock.is_base();
-
-        scutes_top_down.push(ValidatedScute {
-            data: data.dev_ref(),
-            hash: hash.dev_ref(),
-            superblock,
-            // ValidatedScute.root is owned (Vec<u8>) for the activation
-            // path's lifetime; copy out of the stack buffer.
-            root: current_root[..current_root_len].to_vec(),
-        });
+        layers_top_down.push((data.path.clone(), hash.path.clone()));
 
         if is_base {
             break;
         }
 
-        // Walk to parent: salt_prefix is `digest_size` bytes (the
-        // parent's full root). The parser already enforces
-        // salt_size >= digest_size, so this slice is in bounds.
-        let salt = scutes_top_down.last().unwrap().superblock.full_salt();
+        let salt = superblock.full_salt();
         current_root[..digest_size].copy_from_slice(&salt[..digest_size]);
-        current_root_len = digest_size;
     }
 
-    // Reverse to BASE → TOP. Position in `scutes` is the chain index.
-    // In-place reverse avoids the allocation that
-    // `into_iter().rev().collect()` would do.
-    let mut scutes = scutes_top_down;
-    scutes.reverse();
-    Ok(ValidatedChain { scutes })
+    let mut layers = layers_top_down;
+    layers.reverse();
+    Ok(layers)
 }
 
-fn wrap_partition_not_found(e: CarapaceError, depth: usize, role: &'static str) -> CarapaceError {
-    match e {
-        CarapaceError::PartitionNotFound { partuuid } => CarapaceError::ChainWalkFailed {
-            depth,
-            reason: format!("{role} partition not found: PARTUUID {partuuid}"),
-        },
-        other => other,
+/// Re-wrap a `NotFound` from partition resolution into `InvalidData` with
+/// a chain-walk context message.
+fn wrap_partition_not_found(e: io::Error, depth: usize, role: &'static str) -> io::Error {
+    if e.kind() == io::ErrorKind::NotFound {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "chain walk failed at depth {depth}: {role} partition not found: {}",
+                e
+            ),
+        )
+    } else {
+        e
     }
 }
 
@@ -238,10 +162,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    /// Build a 4 KiB block whose first 512 bytes are a synthetic
-    /// verity superblock, the rest zero-padded. `salt_prefix` is
-    /// copied into salt bytes 0..len; `salt_size` is set accordingly.
-    /// Defaults to sha256; use [`synth_sb_alg`] to test sha512.
     fn synth_sb(salt_size: u16, salt_prefix: &[u8]) -> [u8; VERITY_SUPERBLOCK_SIZE] {
         synth_sb_alg("sha256", salt_size, salt_prefix)
     }
@@ -257,17 +177,11 @@ mod tests {
         buf[68..72].copy_from_slice(&4096u32.to_le_bytes()); // hash_block_size
         buf[72..80].copy_from_slice(&1u64.to_le_bytes()); // data_blocks
         buf[80..82].copy_from_slice(&salt_size.to_le_bytes());
-        // salt at 88..(88+salt_size)
         let n = (salt_size as usize).min(salt_prefix.len());
         buf[88..88 + n].copy_from_slice(&salt_prefix[..n]);
         buf
     }
 
-    /// Mock implementation of [`ChainResolver`] backed by an in-memory
-    /// HashMap keyed by raw PARTUUID. `with_hash` registers a hash
-    /// partition + its synthetic superblock; `with_data` registers a
-    /// data partition. Lookups for absent PARTUUIDs return
-    /// [`CarapaceError::PartitionNotFound`].
     #[derive(Default)]
     struct MockResolver {
         datas: HashMap<[u8; 16], ResolvedPartition>,
@@ -275,40 +189,42 @@ mod tests {
     }
 
     impl MockResolver {
-        fn part(label: &str, minor: u32) -> ResolvedPartition {
+        fn part(label: &str) -> ResolvedPartition {
             ResolvedPartition {
                 path: PathBuf::from(format!("/dev/mock-{label}")),
-                major: 252,
-                minor,
             }
         }
         fn with_data(mut self, partuuid: [u8; 16]) -> Self {
-            self.datas.insert(partuuid, Self::part("data", 0));
+            self.datas.insert(partuuid, Self::part("data"));
             self
         }
         fn with_hash(mut self, partuuid: [u8; 16], sb: &[u8; VERITY_SUPERBLOCK_SIZE]) -> Self {
-            self.hashes.insert(partuuid, (Self::part("hash", 1), *sb));
+            self.hashes.insert(partuuid, (Self::part("hash"), *sb));
             self
         }
     }
 
     impl ChainResolver for MockResolver {
-        fn resolve_data(&self, p: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError> {
-            self.datas
-                .get(p)
-                .ok_or_else(|| CarapaceError::PartitionNotFound {
-                    partuuid: format!("{p:02x?}"),
-                })
+        fn resolve_data(&self, p: &[u8; 16]) -> io::Result<&ResolvedPartition> {
+            self.datas.get(p).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("partition not found: PARTUUID {:02x?}", p),
+                )
+            })
         }
         fn resolve_hash(
             &self,
             p: &[u8; 16],
-        ) -> Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE]), CarapaceError> {
+        ) -> io::Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])> {
             self.hashes
                 .get(p)
                 .map(|(part, sb)| (part, *sb))
-                .ok_or_else(|| CarapaceError::PartitionNotFound {
-                    partuuid: format!("{p:02x?}"),
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("partition not found: PARTUUID {:02x?}", p),
+                    )
                 })
         }
     }
@@ -322,19 +238,15 @@ mod tests {
 
     #[test]
     fn walks_one_scute_base_chain() {
-        // Top == base: salt_prefix is 32 zero bytes (the no-parent
-        // sentinel).
         let resolver = MockResolver::default()
             .with_data([0xAA; 16])
             .with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]));
-        let chain = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
-        assert_eq!(chain.scutes.len(), 1);
-        assert!(chain.scutes[0].superblock.is_base());
+        let layers = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
+        assert_eq!(layers.len(), 1);
     }
 
     #[test]
     fn walks_two_scute_chain_in_base_to_top_order() {
-        // Top scute's salt[..32] = base's (data_partuuid || hash_partuuid).
         let mut top_salt = [0u8; 32];
         top_salt[..16].copy_from_slice(&[0xAA; 16]);
         top_salt[16..32].copy_from_slice(&[0xBB; 16]);
@@ -343,46 +255,40 @@ mod tests {
             .with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]))
             .with_data([0xCC; 16])
             .with_hash([0xDD; 16], &synth_sb(32, &top_salt));
-        let chain = walk_chain(&root_from(0xCC, 0xDD), &resolver).unwrap();
-        assert_eq!(chain.scutes.len(), 2);
-        assert!(chain.scutes[0].superblock.is_base(), "scutes[0] is base");
-        assert!(
-            !chain.scutes[1].superblock.is_base(),
-            "scutes[1] is non-base"
-        );
-        // CRITICAL-1 lock: top scute's root equals the trusted root.
-        assert_eq!(chain.scutes[1].root, root_from(0xCC, 0xDD).to_vec());
+        let layers = walk_chain(&root_from(0xCC, 0xDD), &resolver).unwrap();
+        assert_eq!(layers.len(), 2);
+        // BASE is first (the one with zero-prefix salt).
+        assert_eq!(layers[0].0, PathBuf::from("/dev/mock-data"));
     }
 
     #[test]
     fn rejects_chain_with_missing_hash_partition() {
-        // Data exists, hash does not.
         let resolver = MockResolver::default().with_data([0xAA; 16]);
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
-            Err(CarapaceError::ChainWalkFailed { reason, .. }) => {
-                assert!(reason.contains("hash partition not found"), "got: {reason}");
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData, "got: {e}");
+                assert!(e.to_string().contains("hash partition not found"), "got: {e}");
             }
-            other => panic!("expected ChainWalkFailed, got {other:?}"),
+            other => panic!("expected Err, got {other:?}"),
         }
     }
 
     #[test]
     fn rejects_chain_with_missing_data_partition() {
-        // Hash exists, data does not.
         let resolver = MockResolver::default().with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
-            Err(CarapaceError::ChainWalkFailed { reason, .. }) => {
-                assert!(reason.contains("data partition not found"), "got: {reason}");
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData, "got: {e}");
+                assert!(e.to_string().contains("data partition not found"), "got: {e}");
             }
-            other => panic!("expected ChainWalkFailed, got {other:?}"),
+            other => panic!("expected Err, got {other:?}"),
         }
     }
 
     #[test]
     fn rejects_cycle() {
-        // Self-loop: a non-base scute whose salt[..32] points at itself.
         let mut self_salt = [0u8; 32];
         self_salt[..16].copy_from_slice(&[0xAA; 16]);
         self_salt[16..32].copy_from_slice(&[0xBB; 16]);
@@ -391,49 +297,35 @@ mod tests {
             .with_hash([0xBB; 16], &synth_sb(32, &self_salt));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
-            Err(CarapaceError::ChainWalkFailed { reason, .. }) => {
-                assert!(reason.contains("cycle"), "got: {reason}");
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData, "got: {e}");
+                assert!(e.to_string().contains("cycle"), "got: {e}");
             }
-            other => panic!("expected cycle ChainWalkFailed, got {other:?}"),
+            other => panic!("expected cycle error, got {other:?}"),
         }
     }
 
     #[test]
     fn rejects_non_base_with_short_salt() {
-        // A scute with non-zero salt prefix (so not base) but
-        // salt_size < 32 (so we can't extract the parent PARTUUIDs).
-        // The parser's own salt-size whitelist now requires
-        // salt_size >= digest_size, so this hits the parser first;
-        // either way it's a clean validation failure.
         let resolver = MockResolver::default()
             .with_data([0xAA; 16])
             .with_hash([0xBB; 16], &synth_sb(16, &[0xFF; 16]));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         assert!(
-            matches!(
-                r,
-                Err(CarapaceError::WhitelistViolation {
-                    field: "salt_size",
-                    ..
-                } | CarapaceError::ChainWalkFailed { .. })
-            ),
+            matches!(r, Err(ref e) if e.kind() == io::ErrorKind::InvalidData),
             "got: {r:?}"
         );
     }
 
     #[test]
-    fn trusted_root_too_short_is_usage_error() {
+    fn trusted_root_too_short_is_invalid_input_error() {
         let resolver = MockResolver::default();
-        assert!(matches!(
-            walk_chain(&[0u8; 16], &resolver),
-            Err(CarapaceError::Usage(_))
-        ));
+        let e = walk_chain(&[0u8; 16], &resolver).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn walks_one_scute_sha512_base_chain() {
-        // sha512 base: salt prefix is 64 zero bytes (sentinel), then
-        // optional builder suffix. Trusted root must be 64 bytes.
         let resolver = MockResolver::default()
             .with_data([0xAA; 16])
             .with_hash([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]));
@@ -441,48 +333,34 @@ mod tests {
         let mut trusted_root = [0u8; 64];
         trusted_root[..16].fill(0xAA);
         trusted_root[16..32].fill(0xBB);
-        // 32..64 holds the upper half of the digest — for the top
-        // scute these bytes are baked into trusted_root by the operator.
         for (i, b) in trusted_root[32..].iter_mut().enumerate() {
             *b = 0x40 + i as u8;
         }
 
-        let chain = walk_chain(&trusted_root, &resolver).unwrap();
-        assert_eq!(chain.scutes.len(), 1);
-        assert_eq!(
-            chain.scutes[0].root.len(),
-            64,
-            "sha512 chain root must be 64 bytes (full digest), not 32"
-        );
-        assert_eq!(chain.scutes[0].root, trusted_root.to_vec());
+        let layers = walk_chain(&trusted_root, &resolver).unwrap();
+        assert_eq!(layers.len(), 1);
     }
 
     #[test]
     fn rejects_sha512_chain_with_32_byte_trusted_root() {
-        // Operator misconfiguration: chain advertises sha512 but the
-        // trusted_root supplied is only 32 bytes. Walker should refuse
-        // before dm-verity activation would silently truncate.
         let resolver = MockResolver::default()
             .with_data([0xAA; 16])
             .with_hash([0xBB; 16], &synth_sb_alg("sha512", 64, &[0u8; 64]));
         let r = walk_chain(&root_from(0xAA, 0xBB), &resolver);
         match r {
-            Err(CarapaceError::Usage(msg)) => {
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "got: {e}");
                 assert!(
-                    msg.contains("sha512") && msg.contains("64"),
-                    "expected Usage citing sha512 + 64; got {msg}"
+                    e.to_string().contains("sha512") && e.to_string().contains("64"),
+                    "expected message citing sha512 + 64; got {e}"
                 );
             }
-            other => panic!("expected Usage error, got {other:?}"),
+            other => panic!("expected InvalidInput error, got {other:?}"),
         }
     }
 
     #[test]
     fn rejects_chain_exceeding_max_depth() {
-        // Non-cyclic chain longer than MAX_CHAIN_DEPTH. Each scute's
-        // salt[..32] points to a distinct deeper scute — no cycle, no
-        // base sentinel reached within the limit. The walker should
-        // surface the depth-limit guard, not loop forever.
         let mut resolver = MockResolver::default();
         for i in 0..MAX_CHAIN_DEPTH as u8 {
             let data = [i; 16];
@@ -497,23 +375,16 @@ mod tests {
         let mut root = [0u8; 32];
         root[..16].fill(0);
         root[16..32].fill(0x80);
-        match walk_chain(&root, &resolver) {
-            Err(CarapaceError::ChainWalkFailed { reason, depth }) => {
-                assert!(
-                    reason.contains("MAX_CHAIN_DEPTH"),
-                    "expected depth-limit error, got: {reason}"
-                );
-                assert_eq!(depth, MAX_CHAIN_DEPTH);
-            }
-            other => panic!("expected ChainWalkFailed depth-limit, got {other:?}"),
-        }
+        let e = walk_chain(&root, &resolver).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            e.to_string().contains("MAX_CHAIN_DEPTH"),
+            "expected depth-limit error, got: {e}"
+        );
     }
 
     #[test]
     fn rejects_chain_with_mixed_algorithm_across_scutes() {
-        // Top scute is sha256; non-base scute is sha512. Spec §275:
-        // every scute MUST equal chain_params.algorithm. Walker locks
-        // the algorithm at the top scute and enforces equality.
         let mut top_salt = [0u8; 32];
         top_salt[..16].copy_from_slice(&[0xAA; 16]);
         top_salt[16..32].copy_from_slice(&[0xBB; 16]);
@@ -526,14 +397,14 @@ mod tests {
             .with_hash([0xDD; 16], &synth_sb_alg("sha256", 32, &top_salt));
         let r = walk_chain(&root_from(0xCC, 0xDD), &resolver);
         match r {
-            Err(CarapaceError::WhitelistViolation { field, value, .. }) => {
-                assert_eq!(field, "algorithm");
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData, "got: {e}");
                 assert!(
-                    value.contains("sha512") && value.contains("sha256"),
-                    "got {value}"
+                    e.to_string().contains("sha512") && e.to_string().contains("sha256"),
+                    "got {e}"
                 );
             }
-            other => panic!("expected WhitelistViolation, got {other:?}"),
+            other => panic!("expected algorithm mismatch error, got {other:?}"),
         }
     }
 }

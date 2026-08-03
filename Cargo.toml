@@ -12,12 +12,13 @@ repository = "https://github.com/pichi-vm/carapace"
 # Single-crate workspace (carapace); these shared entries feed the crate's
 # `{ workspace = true }` deps.
 [workspace.dependencies]
-thiserror = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
 tempfile = "3"
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+# All unsafe now lives in the devmap/lodown substrate crates; carapace is
+# unsafe-free.
+unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"

@@ -10,7 +10,7 @@
 //!   magic (u32 LE) | valid (u32 LE) | version (u32 LE) | chunk_size (u32 LE)
 //! All numeric fields are little-endian.
 
-use crate::CarapaceError;
+use std::io;
 use zerocopy::little_endian::U32;
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
@@ -20,11 +20,7 @@ pub(crate) const SNAPSHOT_HEADER_SIZE: usize = 16;
 const SNAPSHOT_VALID: u32 = 1;
 const SNAPSHOT_VERSION: u32 = 1;
 /// Spec §136 (Parameter Whitelist) + §281: chunk_size MUST equal 8
-/// (sectors; equivalent to 4096 bytes). Inter-scute equality is
-/// necessary but not sufficient — a chain that internally agrees on
-/// `chunk_size = 16` everywhere would have passed if we only checked
-/// equality, then misaligned against the activation code's hardcoded
-/// `SNAPSHOT_CHUNK_SIZE_SECTORS = 8`. Whitelist the literal value here.
+/// (sectors; equivalent to 4096 bytes).
 const RDP_CHUNK_SIZE: u32 = 8;
 
 #[derive(FromBytes, KnownLayout, Immutable, Debug, Clone, Copy)]
@@ -47,14 +43,13 @@ pub(crate) struct ValidatedSnapshotHeader {
 impl ValidatedSnapshotHeader {
     /// Parse 16 bytes read through the activated dm-verity device for
     /// the scute at `scute_index` (BASE → TOP). All four invariant
-    /// fields (magic / valid / version / chunk_size) are checked; any
-    /// mismatch returns [`CarapaceError::SnapshotHeaderInvalid`] with
-    /// the scute index attached so the operator can localize the
-    /// failure.
-    pub(crate) fn parse(bytes: &[u8], scute_index: usize) -> Result<Self, CarapaceError> {
-        let invalid = |reason: String| CarapaceError::SnapshotHeaderInvalid {
-            scute_index,
-            reason,
+    /// fields (magic / valid / version / chunk_size) are checked.
+    pub(crate) fn parse(bytes: &[u8], scute_index: usize) -> io::Result<Self> {
+        let invalid = |reason: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("scute {scute_index}: snapshot header: {reason}"),
+            )
         };
         if bytes.len() < SNAPSHOT_HEADER_SIZE {
             return Err(invalid(format!(
@@ -119,38 +114,41 @@ mod tests {
     #[test]
     fn rejects_wrong_magic() {
         let b = header_bytes(0xdead_beef, 1, 1, 8);
-        assert!(ValidatedSnapshotHeader::parse(&b, 0).is_err());
+        let e = ValidatedSnapshotHeader::parse(&b, 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_invalid_flag() {
         let b = header_bytes(SNAPSHOT_MAGIC, 0, 1, 8);
-        assert!(ValidatedSnapshotHeader::parse(&b, 0).is_err());
+        let e = ValidatedSnapshotHeader::parse(&b, 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_unknown_version() {
         let b = header_bytes(SNAPSHOT_MAGIC, 1, 2, 8);
-        assert!(ValidatedSnapshotHeader::parse(&b, 0).is_err());
+        let e = ValidatedSnapshotHeader::parse(&b, 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_chunk_size_not_equal_to_eight() {
-        // Every value other than the spec-mandated 8 must be rejected,
-        // including power-of-two values like 4 and 16 that would have
-        // passed a "positive power of two" check.
         for cs in [0u32, 1, 2, 3, 4, 5, 7, 9, 16, 32, 64, 4096] {
             let b = header_bytes(SNAPSHOT_MAGIC, 1, 1, cs);
-            assert!(
-                ValidatedSnapshotHeader::parse(&b, 0).is_err(),
-                "chunk_size = {cs} should fail (only 8 is whitelisted)"
+            let e = ValidatedSnapshotHeader::parse(&b, 0).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                io::ErrorKind::InvalidData,
+                "chunk_size = {cs} should fail"
             );
         }
     }
 
     #[test]
     fn rejects_short_buffer() {
-        assert!(ValidatedSnapshotHeader::parse(&[0u8; 10], 0).is_err());
+        let e = ValidatedSnapshotHeader::parse(&[0u8; 10], 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

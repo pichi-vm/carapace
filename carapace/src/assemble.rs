@@ -1,276 +1,242 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Top-level orchestrator that bridges the chain walker
-//! (`crate::chain`) and the dm primitives (`crate::dm`). Builds the
-//! read stack: dm-zero + per-scute (verity, snapshot) + top alias.
-//! `RollbackOnDrop` ensures partial-failure cleanup runs in
-//! dependency-correct (reverse-push) order.
+//! Recursive assembler that builds the dm-verity + dm-snapshot read stack
+//! from an ordered `&[Layer]` slice (BASE → TOP) and a trusted root hash.
 //!
-//! This module exists outside `dm/` so the dm submodule stays
-//! chain-agnostic — `dm/` knows kernel ABI, dm-table rendering, and
-//! per-device RAII; it does NOT know what a "scute" is. The bridge
-//! between the chain walker's output and the dm activation primitives
-//! lives here.
+//! Content-addressed dm device names:
+//!   dm-zero  → `CARAPACE-z`
+//!   verity Vᵢ → `CARAPACE-v{hex(Rᵢ[0..16])}`
+//!   snapshot Sᵢ → `CARAPACE-s{hex(Rᵢ[16..32])}`
+//!
+//! The recursion peels layers with `split_last` (TOP first, recurse on LOWER
+//! with the parent root = this layer's salt prefix). Base case = dm-zero.
+//! Interior `Removed`s drop at frame exit → `DM_DEFERRED_REMOVE`; they're
+//! busy (held by the device above), so removal just schedules. The outermost
+//! frame's `Removed` is returned to the caller (the mount bridge).
 
-use crate::chain::ValidatedChain;
-use crate::dm::{
-    open_dm_control, DmCreateMode, DmDevice, DmTable, TableLine, TargetSpec,
-    DM_UDEV_PRIMARY_SOURCE_COOKIE,
-};
 use crate::snapshot::{ValidatedSnapshotHeader, SNAPSHOT_HEADER_SIZE};
-use crate::CarapaceError;
+use crate::util::hex_lower;
+use crate::verity::ValidatedVeritySuperblock;
+use crate::Layer;
+use devmap::targets::snapshot::Snapshot;
+use devmap::targets::{Verity, Zero};
+use devmap::{Control, DevId, Removed};
 use std::fs::File;
-use std::io::Read;
-use std::os::unix::fs::symlink;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::Path;
 
-/// dm-zero virtual length. Snapshot length lock: every per-scute
-/// snapshot inherits this value (kernel rejects snapshot.length >
-/// origin.length, and every snapshot's origin chains to dm-zero).
+/// dm-zero virtual length = 64 GiB in sectors. Every snapshot inherits
+/// this length (kernel: snapshot.length ≤ origin.length).
 pub(crate) const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;
 
-/// dm-snapshot chunk_size for read-stack snapshots. Spec RDP = 8 sectors.
-pub(crate) const SNAPSHOT_CHUNK_SIZE_SECTORS: u64 = 8;
-
-const VERITY_BLOCK_SIZE_BYTES: u32 = 4096;
-
-/// Create a dm device, load a single-line table, resume.
-///
-/// All four target shapes the read stack uses (zero, linear, verity,
-/// snapshot) follow this exact ioctl sequence — only the per-target
-/// `TargetSpec` and the create-time `mode` vary. One helper instead of
-/// four removes ~40 LOC of repetition and lets each call site read as
-/// "what dm device am I making" rather than "which of four nearly-
-/// identical wrappers to call."
-///
-/// `control` is the orchestrator's shared `/dev/mapper/control` fd —
-/// reused across all three ioctls (create, load_table, resume) for
-/// every device in the stack.
-fn activate_one_line(
-    control: &mut File,
-    name: &str,
-    mode: DmCreateMode,
-    length_sectors: u64,
-    target: TargetSpec,
-    udev_cookie: u32,
-) -> Result<DmDevice, CarapaceError> {
-    let dev = DmDevice::create(control, name, mode)?;
-    let t = DmTable {
-        lines: vec![TableLine {
-            start: 0,
-            length: length_sectors,
-            target,
-        }],
-    };
-    dev.load_table(control, &t)?;
-    dev.resume(control, udev_cookie)?;
-    Ok(dev)
+/// Sector count for a verity device given data_blocks (each 4096 bytes).
+fn verity_sectors(data_blocks: u64) -> u64 {
+    data_blocks * 4096 / 512
 }
 
-/// Read the dm-snapshot persistent header from offset 0 of an
-/// activated dm-verity device and validate it against spec §136 +
-/// §281 (magic / valid / version / chunk_size == 8). Reading THROUGH
-/// the verity device — not directly from the data partition — means
-/// the kernel has integrity-checked the bytes before we parse them
-/// (CRITICAL-1's spirit applied to the snapshot header).
-///
-/// Returns `()` because every accepted header is identical (per the
-/// RDP whitelist). Cross-scute equality is automatic if every scute
-/// passes this check, so no comparison loop is needed in the caller.
-fn validate_snapshot_header_through_verity(
-    verity_dev_path: &Path,
-    scute_index: usize,
-) -> Result<(), CarapaceError> {
-    let mut f = File::open(verity_dev_path)?;
-    let mut buf = [0u8; SNAPSHOT_HEADER_SIZE];
-    f.read_exact(&mut buf)?;
-    ValidatedSnapshotHeader::parse(&buf, scute_index)?;
-    Ok(())
+/// Content-addressed name: verity Vᵢ.
+fn v_name(root: &[u8]) -> String {
+    format!("CARAPACE-v{}", hex_lower(&root[..root.len().min(16)]))
 }
 
-/// Build the full read stack — `<name>-z0`, then per-scute pair
-/// `<name>-v<i>` and `<name>-s<i>`, then top alias `<name>` — and
-/// return the operator-visible `/dev/mapper/<name>` path (a symlink
-/// carapace creates itself; see [`link_mapper_node`]). On any error the
-/// partial stack is torn down in reverse-push order via
-/// [`RollbackOnDrop`]; on success the devices are forgotten so the
-/// kernel state outlives this process.
+/// Content-addressed name: snapshot Sᵢ.
+fn s_name(root: &[u8]) -> String {
+    let start = root.len().min(16);
+    let end = root.len().min(32);
+    format!("CARAPACE-s{}", hex_lower(&root[start..end]))
+}
+
+/// Create-or-reuse a dm device by content-addressed name.
 ///
-/// dm-verity references the data/hash partition devices by `<maj>:<min>`
-/// (sysfs-published at GPT-partscan time; no udev sync). The chunk_size
-/// is read through each freshly-activated dm-verity device so dm-verity
-/// integrity-checks the bytes the consumer trusts.
+/// Safety reasoning: names are content-addressed (CARAPACE-v/s prefix +
+/// hex of a cryptographic root prefix). Only carapace/corium create
+/// `CARAPACE-*` devices, and doing so requires CAP_SYS_ADMIN. A collision
+/// means an identical layer is already active — safe to reuse.
+fn create_or_reuse(ctl: &Control, name: &str) -> io::Result<Removed> {
+    match ctl.create(name) {
+        Ok(removed) => Ok(removed),
+        Err(e)
+            if e.kind() == io::ErrorKind::AlreadyExists
+                || e.kind() == io::ErrorKind::ResourceBusy =>
+        {
+            let (device, _status) = ctl.by_name(name)?;
+            Ok(Removed::from(device))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Resolve a path to its `DevId`.
 ///
-/// **Panic discipline.** Cargo.toml release profile sets
-/// `panic = "abort"` (smaller binary, no unwinding code). A consequence
-/// is that *if* this function panics mid-build, `RollbackOnDrop`'s
-/// `Drop` does NOT run and the partial dm stack leaks until an
-/// explicit `carapace detach` clears it. Therefore every `unwrap` /
-/// `expect` reachable from this function is backed by an invariant
-/// the function itself maintains:
-///
-///   * `stack.devices.last().unwrap()` after a successful push.
-///   * `expect("DmTableBuf invariant: …")` is guarded by zerocopy's
-///     `mut_from_prefix` against a buffer we constructed at known size.
-///   * `from_utf8(kernel_type_name())` operates on hardcoded ASCII.
-///
-/// New panic sources (especially in helpers) MUST preserve this
-/// property. Recover-via-Result, not panic, is the rule for any
-/// caller-influenced state in this code path.
-pub(crate) fn assemble_read_stack(
-    name: &str,
-    chain: ValidatedChain,
-) -> Result<PathBuf, CarapaceError> {
-    // ONE /dev/mapper/control fd shared across every dm ioctl in this
-    // activation. Replaces the prior shape's per-device open (3N+1
-    // syscalls per attach with a per-DmDevice RefCell<File>).
-    let mut control = open_dm_control()?;
-    let mut stack = RollbackOnDrop {
-        devices: Vec::new(),
+/// - Block device → stat and decode rdev.
+/// - Regular file → loop-attach (feature `loop`).
+#[cfg_attr(not(feature = "loop"), allow(unused_variables))]
+fn resolve(
+    path: &Path,
+    #[cfg(feature = "loop")] loops: &mut Vec<lodown::LoopDevice>,
+    #[cfg(not(feature = "loop"))] _loops: &mut Vec<()>,
+    ctl: &Control,
+) -> io::Result<DevId> {
+    use std::os::unix::fs::FileTypeExt;
+    let meta = std::fs::metadata(path)?;
+    if meta.file_type().is_block_device() {
+        let dev = ctl.by_node(path)?;
+        return Ok(dev.id());
+    }
+    if meta.file_type().is_file() {
+        #[cfg(feature = "loop")]
+        {
+            use lodown::{Config, LoopDevice};
+            let lctl = lodown::Control::open()?;
+            let backing = File::open(path)?;
+            let config = Config::new().autoclear(true).read_only(true);
+            // Retry on ResourceBusy: get_free races with other processes.
+            let detached = loop {
+                match lctl.attach(&backing, &config) {
+                    Ok(d) => break d,
+                    Err(e) if e.kind() == io::ErrorKind::ResourceBusy => continue,
+                    Err(e) => return Err(e),
+                }
+            };
+            let number = detached.number();
+            let loop_dev: LoopDevice = detached.into();
+            // DevId for loop devices: major=7, minor=number (default max_part=0).
+            let id = DevId::new(7, number).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "loop device number out of range")
+            })?;
+            loops.push(loop_dev);
+            return Ok(id);
+        }
+        #[cfg(not(feature = "loop"))]
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("file-backed layers need feature `loop`: {}", path.display()),
+            ));
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "path is not a block device or regular file: {}",
+            path.display()
+        ),
+    ))
+}
+
+/// Recursive core. Returns the top `Removed` of the sub-stack.
+fn assemble_from(
+    layers: &[Layer],
+    root: &[u8],
+    ctl: &Control,
+    #[cfg(feature = "loop")] loops: &mut Vec<lodown::LoopDevice>,
+    #[cfg(not(feature = "loop"))] loops: &mut Vec<()>,
+) -> io::Result<Removed> {
+    let Some((top, lower)) = layers.split_last() else {
+        // Base case: dm-zero origin.
+        let z = create_or_reuse(ctl, "CARAPACE-z")?;
+        z.builder()
+            .add(0, ZERO_COUNT_SECTORS, Zero)?
+            .load()
+            .map_err(|e| io::Error::new(e.kind(), format!("dm-zero table load: {e}")))?;
+        z.resume()
+            .map_err(|e| io::Error::new(e.kind(), format!("dm-zero resume: {e}")))?;
+        return Ok(z);
     };
 
-    // Bottom layer: dm-zero of the spec-mandated apparent length.
-    let z = activate_one_line(
-        &mut control,
-        &format!("{name}-z0"),
-        DmCreateMode::ReadWrite,
-        ZERO_COUNT_SECTORS,
-        TargetSpec::Zero,
-        // Internal layer: no /dev/mapper entry, so no udev cookie.
-        0,
-    )?;
-    stack.devices.push(z);
+    // Absolute BASE→TOP index of this frame's top layer, for error
+    // attribution only. Slices are always base-anchored prefixes, so the
+    // top's index is simply the number of layers below it.
+    let scute_index = lower.len();
 
-    for (i, scute) in chain.scutes.into_iter().enumerate() {
-        let data_sectors = scute.superblock.data_blocks * (VERITY_BLOCK_SIZE_BYTES as u64) / 512;
-        let v = activate_one_line(
-            &mut control,
-            &format!("{name}-v{i}"),
-            DmCreateMode::ReadOnly,
-            data_sectors,
-            TargetSpec::verity(
-                scute.data,
-                scute.hash,
-                scute.superblock.algorithm.name(),
-                scute.superblock.data_blocks,
-                scute.superblock.full_salt(),
-                &scute.root,
+    // Read and validate the hash superblock for this layer.
+    let sb = {
+        use std::fs::OpenOptions;
+        let mut f = OpenOptions::new().read(true).open(&top.hash)?;
+        let mut buf = [0u8; crate::verity::superblock::VERITY_SUPERBLOCK_SIZE];
+        f.read_exact(&mut buf)?;
+        ValidatedVeritySuperblock::parse(&buf, scute_index)?
+    };
+
+    // Derive Rᵢ from the salt prefix (salt[..digest_size] = parent root for
+    // non-base; base sentinel = all zero prefix checked by superblock parser).
+    let digest_size = sb.algorithm.digest_size();
+
+    // Re-derive the parent root from the salt prefix (= Rᵢ₋₁).
+    let parent_root = &sb.full_salt()[..digest_size];
+
+    // Recurse on lower layers with the parent root.
+    let origin = assemble_from(lower, parent_root, ctl, loops)?;
+
+    // Resolve data and hash paths to DevIds.
+    let data_id = resolve(&top.data, loops, ctl)?;
+    let hash_id = resolve(&top.hash, loops, ctl)?;
+
+    let vi = create_or_reuse(ctl, &v_name(root))?;
+    vi.builder()
+        .read_only() // dm-verity refuses a writable table
+        .add(
+            0,
+            verity_sectors(sb.data_blocks),
+            Verity::new(
+                data_id,
+                hash_id,
+                sb.data_blocks,
+                sb.algorithm.name(),
+                root.to_vec(),
+                sb.full_salt().to_vec(),
             ),
+        )?
+        .load()
+        .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} verity table load: {e}")))?;
+    vi.resume()
+        .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} verity resume: {e}")))?;
+
+    // Validate snapshot header through the activated dm-verity device
+    // (reads integrity-checked bytes, not raw data partition).
+    {
+        let verity_path = format!("/dev/dm-{}", vi.id().minor());
+        let mut f = File::open(&verity_path)?;
+        let mut buf = [0u8; SNAPSHOT_HEADER_SIZE];
+        f.read_exact(&mut buf)?;
+        ValidatedSnapshotHeader::parse(&buf, scute_index)?;
+    }
+
+    let si = create_or_reuse(ctl, &s_name(root))?;
+    si.builder()
+        .read_only() // read-only composition: never writes exceptions to the verity cow
+        .add(
             0,
-        )?;
-
-        // Snapshot-header sanity through the activated dm-verity device.
-        // Per-scute literal whitelist makes cross-scute equality
-        // automatic (every accepted header is identical), so no
-        // comparison loop is needed.
-        validate_snapshot_header_through_verity(&v.dev_node(), i)?;
-        stack.devices.push(v);
-
-        // After this branch the layout is z, v0, s0, v1, s1, …
-        // Snapshot origin = z0 for i==0 else previous snapshot. Length
-        // is locked to ZERO_COUNT_SECTORS (kernel rejects snapshot.length
-        // > origin.length).
-        let origin = if i == 0 {
-            stack.devices[0].dev_ref()
-        } else {
-            // Previous snapshot at vec index 1 + 2(i-1) + 1 = 2*i.
-            stack.devices[2 * i].dev_ref()
-        };
-        let cow = stack.devices.last().unwrap().dev_ref();
-        let s = activate_one_line(
-            &mut control,
-            &format!("{name}-s{i}"),
-            DmCreateMode::ReadOnly,
             ZERO_COUNT_SECTORS,
-            TargetSpec::Snapshot {
-                origin,
-                cow,
-                chunk_size_sectors: SNAPSHOT_CHUNK_SIZE_SECTORS,
-            },
-            0,
-        )?;
-        stack.devices.push(s);
-    }
+            Snapshot::new(origin.id(), vi.id(), 8),
+        )?
+        .load()
+        .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} snapshot table load: {e}")))?;
+    si.resume()
+        .map_err(|e| io::Error::new(e.kind(), format!("scute {scute_index} snapshot resume: {e}")))?;
 
-    // Top alias: dm-linear over the top snapshot, giving the composed
-    // device its stable `<name>`. Sized to ZERO_COUNT_SECTORS per the
-    // carapace spec ("Specification Constants" / "Why ZERO_COUNT is a
-    // specification constant"): the composed device's apparent size is the
-    // dm-zero origin's, and any real filesystem is smaller — its tail blocks
-    // read as zero from dm-zero. The earlier cap to the top scute's
-    // `data_blocks * 4096` (the data *blob* size) truncated the device below
-    // the filesystem for sparse data files (e.g. a `pichi import` of a mostly-zero
-    // image), so `mount` failed; the filesystem self-describes its real size.
-    let alias = activate_one_line(
-        &mut control,
-        name,
-        DmCreateMode::ReadOnly,
-        ZERO_COUNT_SECTORS,
-        TargetSpec::Linear {
-            device: stack.devices.last().unwrap().dev_ref(),
-            offset_sectors: 0,
-        },
-        // Top alias: the authoritative activation of the operator-visible
-        // /dev/mapper/<name>. The primary-source cookie makes udev's DM
-        // rules create and keep the symlink + systemd .device alias.
-        DM_UDEV_PRIMARY_SOURCE_COOKIE,
-    )?;
-    // /dev/dm-<minor> is kernel-synchronous via devtmpfs at
-    // DM_DEV_CREATE time, but the operator-visible `/dev/mapper/<name>`
-    // is not: udev's `13-dm-disk.rules` only creates it for devices
-    // carrying `DM_UDEV_PRIMARY_SOURCE_FLAG`, which a raw dm ioctl does
-    // not set. carapace's whole point is to come up before udev (in an
-    // initramfs, ahead of `systemd-udevd`), so we create the symlink
-    // ourselves rather than depend on udev catching up — matching udev's
-    // own convention of a relative link to `../dm-<minor>`.
-    let (_, minor) = alias.dev_ref();
-    stack.devices.push(alias);
-
-    let mapper = link_mapper_node(name, minor)?;
-    stack.commit();
-    Ok(mapper)
+    // `origin` (dm-zero or lower snapshot) and `vi` (verity) drop here.
+    // Removed::drop issues DM_DEFERRED_REMOVE; they're busy (si holds them),
+    // so the kernel only schedules removal — no EBUSY.
+    Ok(si)
 }
 
-/// Create the operator-visible `/dev/mapper/<name>` symlink pointing at
-/// the kernel devtmpfs node `/dev/dm-<minor>`. A stale link from a
-/// prior attach of the same name is replaced. Called before
-/// [`RollbackOnDrop::commit`] so a failure here tears the dm stack back
-/// down.
-fn link_mapper_node(name: &str, minor: u32) -> Result<PathBuf, CarapaceError> {
-    let link = PathBuf::from(format!("/dev/mapper/{name}"));
-    match std::fs::remove_file(&link) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-    symlink(format!("../dm-{minor}"), &link)?;
-    Ok(link)
-}
+/// Assemble the full read stack for `layers` (BASE → TOP) anchored by
+/// `trusted_root`. Returns the top snapshot `Removed` guard.
+pub(crate) fn assemble(layers: &[Layer], root: &[u8]) -> io::Result<Removed> {
+    let ctl = Control::open()?;
+    #[cfg(feature = "loop")]
+    let mut loops: Vec<lodown::LoopDevice> = Vec::new();
+    #[cfg(not(feature = "loop"))]
+    let mut loops: Vec<()> = Vec::new();
 
-/// RAII rollback for partially-built dm stacks. Pushed devices are
-/// removed in reverse-push order on drop unless `commit()` is called,
-/// which forgets them so the kernel state outlives this scope. The
-/// reverse order is load-bearing: tearing down dependents before their
-/// dependencies (e.g. snapshot before the verity below it) avoids the
-/// EBUSY noise DmDevice::Drop would otherwise log on a panic-driven
-/// teardown.
-struct RollbackOnDrop {
-    devices: Vec<DmDevice>,
-}
+    let result = assemble_from(layers, root, &ctl, &mut loops);
 
-impl RollbackOnDrop {
-    fn commit(mut self) {
-        for dev in self.devices.drain(..) {
-            dev.forget();
-        }
-    }
-}
-
-impl Drop for RollbackOnDrop {
-    fn drop(&mut self) {
-        while let Some(dev) = self.devices.pop() {
-            drop(dev);
-        }
-    }
+    // `loops` (the file-backed layers' loop handles) stays alive until here,
+    // so every loop fd remained open across all the resumes above. Dropping
+    // it now closes those fds, but each loop is still held by its resumed
+    // dm-verity device, so nothing detaches until the chain is torn down —
+    // at which point LO_FLAGS_AUTOCLEAR releases each backing file.
+    result
 }

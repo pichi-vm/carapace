@@ -4,5 +4,6 @@
 pub(crate) mod algorithm;
 pub(crate) mod superblock;
 
+#[cfg(feature = "gpt")]
 pub(crate) use algorithm::Algorithm;
 pub(crate) use superblock::ValidatedVeritySuperblock;

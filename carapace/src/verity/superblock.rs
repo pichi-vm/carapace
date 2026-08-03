@@ -17,15 +17,14 @@
 //!   | salt_size u16 | _pad1[6] | salt[256] | _pad2[168]
 
 use crate::verity::algorithm::{self, Algorithm};
-use crate::CarapaceError;
+use std::io;
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 pub(crate) const VERITY_SUPERBLOCK_SIZE: usize = 512;
 pub(crate) const VERITY_SIGNATURE: [u8; 8] = *b"verity\0\0";
 
-/// RDP-locked v1 chain parameters. Equality with these constants is
-/// both the per-scute legality check and the chain-consistency check.
+/// RDP-locked v1 chain parameters.
 const RDP_DATA_BLOCK_SIZE: u32 = 4096;
 const RDP_HASH_BLOCK_SIZE: u32 = 4096;
 const RDP_HASH_TYPE: u32 = 1;
@@ -63,129 +62,93 @@ impl ValidatedVeritySuperblock {
     /// whitelist.
     ///
     /// `scute_index` is the chain position used for error attribution.
-    /// Every scute carries a `digest_size`-byte salt prefix; the base
-    /// scute uses `digest_size` zero bytes as its prefix (the no-parent
-    /// sentinel; see [`Self::is_base`]). The parser enforces
-    /// `salt_size >= digest_size` uniformly.
-    pub(crate) fn parse(bytes: &[u8], scute_index: usize) -> Result<Self, CarapaceError> {
+    pub(crate) fn parse(bytes: &[u8], scute_index: usize) -> io::Result<Self> {
+        let invalid_data = |reason: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("scute {scute_index}: {reason}"),
+            )
+        };
+
         if bytes.len() < VERITY_SUPERBLOCK_SIZE {
-            return Err(CarapaceError::SuperblockInvalid {
-                scute_index,
-                reason: format!("need {VERITY_SUPERBLOCK_SIZE} bytes, got {}", bytes.len()),
-            });
+            return Err(invalid_data(format!(
+                "superblock: need {VERITY_SUPERBLOCK_SIZE} bytes, got {}",
+                bytes.len()
+            )));
         }
-        let raw = RawVeritySuperblock::ref_from_bytes(&bytes[..VERITY_SUPERBLOCK_SIZE]).map_err(
-            |_| CarapaceError::SuperblockInvalid {
-                scute_index,
-                reason: "alignment / size".into(),
-            },
-        )?;
+        let raw =
+            RawVeritySuperblock::ref_from_bytes(&bytes[..VERITY_SUPERBLOCK_SIZE]).map_err(|_| {
+                invalid_data("superblock: alignment / size".into())
+            })?;
 
         if raw.signature != VERITY_SIGNATURE {
-            return Err(CarapaceError::SuperblockInvalid {
-                scute_index,
-                reason: format!("signature {:?} != {:?}", raw.signature, VERITY_SIGNATURE),
-            });
+            return Err(invalid_data(format!(
+                "superblock: signature {:?} != {:?}",
+                raw.signature, VERITY_SIGNATURE
+            )));
         }
 
-        // -- whitelist (RDP equality on every scute) ------------------
+        // -- whitelist (RDP equality on every scute) --
         let version = raw.version.get();
         if version != RDP_VERSION {
-            return Err(CarapaceError::WhitelistViolation {
-                scute_index,
-                field: "version",
-                value: version.to_string(),
-            });
+            return Err(invalid_data(format!(
+                "whitelist: version = {version} (must be {RDP_VERSION})"
+            )));
         }
         let hash_type = raw.hash_type.get();
         if hash_type != RDP_HASH_TYPE {
-            return Err(CarapaceError::WhitelistViolation {
-                scute_index,
-                field: "hash_type",
-                value: hash_type.to_string(),
-            });
+            return Err(invalid_data(format!(
+                "whitelist: hash_type = {hash_type} (must be {RDP_HASH_TYPE})"
+            )));
         }
         let dbs = raw.data_block_size.get();
         if dbs != RDP_DATA_BLOCK_SIZE {
-            return Err(CarapaceError::WhitelistViolation {
-                scute_index,
-                field: "data_block_size",
-                value: dbs.to_string(),
-            });
+            return Err(invalid_data(format!(
+                "whitelist: data_block_size = {dbs} (must be {RDP_DATA_BLOCK_SIZE})"
+            )));
         }
         let hbs = raw.hash_block_size.get();
         if hbs != RDP_HASH_BLOCK_SIZE {
-            return Err(CarapaceError::WhitelistViolation {
-                scute_index,
-                field: "hash_block_size",
-                value: hbs.to_string(),
-            });
+            return Err(invalid_data(format!(
+                "whitelist: hash_block_size = {hbs} (must be {RDP_HASH_BLOCK_SIZE})"
+            )));
         }
 
-        // Algorithm: parse cstring then check whitelist via algorithm::parse.
-        let alg_str =
-            cstr_to_str(&raw.algorithm).map_err(|e| CarapaceError::SuperblockInvalid {
-                scute_index,
-                reason: format!("algorithm field: {e}"),
-            })?;
-        let algorithm =
-            algorithm::parse(alg_str).map_err(|_| CarapaceError::WhitelistViolation {
-                scute_index,
-                field: "algorithm",
-                value: alg_str.to_string(),
-            })?;
+        // Algorithm: parse cstring then check whitelist.
+        let alg_str = cstr_to_str(&raw.algorithm)
+            .map_err(|e| invalid_data(format!("superblock: algorithm field: {e}")))?;
+        let algorithm = algorithm::parse(alg_str).map_err(|_| {
+            invalid_data(format!("whitelist: algorithm = {alg_str} (not whitelisted)"))
+        })?;
         let digest_size = algorithm.digest_size();
 
-        // Salt size: digest_size <= salt_size <= 256. Every scute
-        // carries a digest_size-byte prefix (parent root, or zero
-        // sentinel for the base — distinguished post-parse via
-        // `is_base()`).
+        // Salt size: digest_size <= salt_size <= 256.
         let salt_size = raw.salt_size.get();
         if salt_size as usize > raw.salt.len() {
-            return Err(CarapaceError::SuperblockInvalid {
-                scute_index,
-                reason: format!(
-                    "salt_size {salt_size} > salt field length {}",
-                    raw.salt.len()
-                ),
-            });
+            return Err(invalid_data(format!(
+                "superblock: salt_size {salt_size} > salt field length {}",
+                raw.salt.len()
+            )));
         }
         if (salt_size as usize) < digest_size {
-            return Err(CarapaceError::WhitelistViolation {
-                scute_index,
-                field: "salt_size",
-                value: format!("{salt_size} < digest_size {digest_size}"),
-            });
+            return Err(invalid_data(format!(
+                "whitelist: salt_size = {salt_size} < digest_size {digest_size}"
+            )));
         }
 
         let data_blocks = raw.data_blocks.get();
         if data_blocks == 0 {
-            // A zero-data-block scute would map to an empty dm-verity
-            // device. The spec doesn't define semantics for it and the
-            // kernel rejects the resulting `0 0 verity ...` table line
-            // with EINVAL — but rejecting at parse time gives a clean
-            // SuperblockInvalid instead of a downstream DmIoctl failure
-            // and avoids any arithmetic on a zero (length, sectors).
-            return Err(CarapaceError::SuperblockInvalid {
-                scute_index,
-                reason: "data_blocks must be > 0".into(),
-            });
+            return Err(invalid_data(
+                "superblock: data_blocks must be > 0".into(),
+            ));
         }
-        // Activation computes `data_blocks * VERITY_BLOCK_SIZE_BYTES`
-        // (then divides by 512 to get sectors) when sizing the
-        // dm-verity table line and the top alias. Overflow is
-        // theoretically reachable with adversarial data_blocks (~2^52
-        // for sha256 RDP) — far above any realistic carapace, but we
-        // validate at the data boundary so no downstream code has to
-        // worry about it.
         if data_blocks
             .checked_mul(RDP_DATA_BLOCK_SIZE as u64)
             .is_none()
         {
-            return Err(CarapaceError::SuperblockInvalid {
-                scute_index,
-                reason: format!("data_blocks {data_blocks} * {RDP_DATA_BLOCK_SIZE} overflows u64"),
-            });
+            return Err(invalid_data(format!(
+                "superblock: data_blocks {data_blocks} * {RDP_DATA_BLOCK_SIZE} overflows u64"
+            )));
         }
 
         Ok(Self {
@@ -202,11 +165,8 @@ impl ValidatedVeritySuperblock {
     }
 
     /// True iff this scute is the chain's base — detected by the
-    /// `digest_size`-byte zero-prefix sentinel in the salt
-    /// (PITFALLS CRITICAL-4: prefix length is `digest_size`, never
-    /// `salt_size`). The chain walker uses this as the termination
-    /// signal; no out-of-band marker (GPT attribute, manifest entry,
-    /// etc.) is needed.
+    /// `digest_size`-byte zero-prefix sentinel in the salt.
+    #[cfg(feature = "gpt")]
     pub(crate) fn is_base(&self) -> bool {
         self.salt_buf[..self.algorithm.digest_size()]
             .iter()
@@ -215,14 +175,6 @@ impl ValidatedVeritySuperblock {
 }
 
 /// Read a NUL-terminated ASCII string out of a fixed-length field.
-///
-/// A field with no NUL byte is malformed: the producer is required by
-/// the dm-verity superblock format to NUL-terminate within the
-/// allotted length. Falling back to the full slice would let trailing
-/// garbage past a missing terminator masquerade as the string, which
-/// the algorithm whitelist would then reject by name — same outcome,
-/// but the wrong-shaped error. Reject explicitly so the operator sees
-/// "missing NUL" rather than "unknown algorithm `sha256<garbage>`".
 fn cstr_to_str(buf: &[u8]) -> Result<&str, &'static str> {
     let end = buf
         .iter()
@@ -235,8 +187,6 @@ fn cstr_to_str(buf: &[u8]) -> Result<&str, &'static str> {
 mod tests {
     use super::*;
 
-    /// Build a 512-byte superblock with the given fields. Useful for
-    /// unit tests; production parsing reads from disk.
     fn synth(
         algorithm: &str,
         version: u32,
@@ -250,14 +200,12 @@ mod tests {
         buf[..8].copy_from_slice(&VERITY_SIGNATURE);
         buf[8..12].copy_from_slice(&version.to_le_bytes());
         buf[12..16].copy_from_slice(&hash_type.to_le_bytes());
-        // uuid 16..32: zeros
         let alg_bytes = algorithm.as_bytes();
         buf[32..32 + alg_bytes.len()].copy_from_slice(alg_bytes);
         buf[64..68].copy_from_slice(&data_block_size.to_le_bytes());
         buf[68..72].copy_from_slice(&hash_block_size.to_le_bytes());
         buf[72..80].copy_from_slice(&1u64.to_le_bytes()); // data_blocks
         buf[80..82].copy_from_slice(&salt_size.to_le_bytes());
-        // _pad1 82..88
         buf[88..88 + salt_prefix.len()].copy_from_slice(salt_prefix);
         buf
     }
@@ -275,7 +223,6 @@ mod tests {
 
     #[test]
     fn parses_sha256_base_with_zero_prefix_and_random_suffix() {
-        // 32 zeros (prefix) + 32 random (suffix) = 64-byte salt.
         let mut salt = [0u8; 64];
         for (i, b) in salt[32..].iter_mut().enumerate() {
             *b = (i + 1) as u8;
@@ -307,14 +254,8 @@ mod tests {
             let sb = synth(alg, 1, 1, 4096, 4096, 32, &prefix);
             let r = ValidatedVeritySuperblock::parse(&sb, 0);
             assert!(
-                matches!(
-                    r,
-                    Err(CarapaceError::WhitelistViolation {
-                        field: "algorithm",
-                        ..
-                    })
-                ),
-                "{alg} should be rejected, got {r:?}"
+                matches!(r, Err(ref e) if e.kind() == io::ErrorKind::InvalidData),
+                "{alg} should be rejected with InvalidData, got {r:?}"
             );
         }
     }
@@ -324,13 +265,8 @@ mod tests {
         let prefix = [0xAA; 32];
         for dbs in [512u32, 1024, 2048, 8192, 0, 7] {
             let sb = synth("sha256", 1, 1, dbs, 4096, 32, &prefix);
-            assert!(matches!(
-                ValidatedVeritySuperblock::parse(&sb, 0),
-                Err(CarapaceError::WhitelistViolation {
-                    field: "data_block_size",
-                    ..
-                })
-            ));
+            let e = ValidatedVeritySuperblock::parse(&sb, 0).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
         }
     }
 
@@ -338,102 +274,69 @@ mod tests {
     fn rejects_hash_type_zero() {
         let prefix = [0xAA; 32];
         let sb = synth("sha256", 1, 0, 4096, 4096, 32, &prefix);
-        assert!(matches!(
-            ValidatedVeritySuperblock::parse(&sb, 0),
-            Err(CarapaceError::WhitelistViolation {
-                field: "hash_type",
-                ..
-            })
-        ));
+        let e = ValidatedVeritySuperblock::parse(&sb, 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_version_zero() {
         let prefix = [0xAA; 32];
         let sb = synth("sha256", 0, 1, 4096, 4096, 32, &prefix);
-        assert!(matches!(
-            ValidatedVeritySuperblock::parse(&sb, 0),
-            Err(CarapaceError::WhitelistViolation {
-                field: "version",
-                ..
-            })
-        ));
+        let e = ValidatedVeritySuperblock::parse(&sb, 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_short_salt_uniformly() {
-        // sha256 needs salt_size >= 32 for any scute (base or non-base).
         let sb = synth("sha256", 1, 1, 4096, 4096, 0, &[]);
-        assert!(matches!(
-            ValidatedVeritySuperblock::parse(&sb, 0),
-            Err(CarapaceError::WhitelistViolation {
-                field: "salt_size",
-                ..
-            })
-        ));
+        let e = ValidatedVeritySuperblock::parse(&sb, 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
         // sha512 needs salt_size >= 64.
         let sb = synth("sha512", 1, 1, 4096, 4096, 32, &[0; 32]);
-        assert!(matches!(
-            ValidatedVeritySuperblock::parse(&sb, 1),
-            Err(CarapaceError::WhitelistViolation {
-                field: "salt_size",
-                ..
-            })
-        ));
+        let e = ValidatedVeritySuperblock::parse(&sb, 1).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_wrong_signature() {
         let mut sb = synth("sha256", 1, 1, 4096, 4096, 32, &[0xAA; 32]);
         sb[0..8].copy_from_slice(b"badmagic");
-        assert!(matches!(
-            ValidatedVeritySuperblock::parse(&sb, 0),
-            Err(CarapaceError::SuperblockInvalid { scute_index: 0, .. })
-        ));
+        let e = ValidatedVeritySuperblock::parse(&sb, 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn rejects_data_blocks_overflow_on_block_size_multiply() {
-        // data_blocks = u64::MAX would overflow when multiplied by
-        // RDP_DATA_BLOCK_SIZE (4096) in the activation path's
-        // length-in-bytes calc. Reject at parse so no downstream code
-        // can hit the overflow.
         let mut sb = synth("sha256", 1, 1, 4096, 4096, 32, &[0xAA; 32]);
         sb[72..80].copy_from_slice(&u64::MAX.to_le_bytes());
         let r = ValidatedVeritySuperblock::parse(&sb, 0);
         assert!(
-            matches!(&r, Err(CarapaceError::SuperblockInvalid { reason, .. }) if reason.contains("overflow")),
-            "expected SuperblockInvalid('...overflow...'), got {r:?}"
+            matches!(&r, Err(e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("overflow")),
+            "expected InvalidData('...overflow...'), got {r:?}"
         );
     }
 
     #[test]
     fn rejects_data_blocks_zero() {
-        // synth() hardcodes data_blocks = 1; override at offset 72.
         let mut sb = synth("sha256", 1, 1, 4096, 4096, 32, &[0xAA; 32]);
         sb[72..80].copy_from_slice(&0u64.to_le_bytes());
         let r = ValidatedVeritySuperblock::parse(&sb, 0);
         assert!(
-            matches!(&r, Err(CarapaceError::SuperblockInvalid { reason, .. }) if reason.contains("data_blocks")),
-            "expected SuperblockInvalid('...data_blocks...'), got {r:?}"
+            matches!(&r, Err(e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("data_blocks")),
+            "expected InvalidData('...data_blocks...'), got {r:?}"
         );
     }
 
     #[test]
     fn rejects_algorithm_field_without_nul_terminator() {
-        // synth() lays "sha256" at offset 32 then leaves the rest of
-        // the 32-byte field as zero — that's well-formed. To exercise
-        // the no-NUL path, fill all 32 bytes of the algorithm field
-        // with a non-NUL byte. The producer would never emit this; an
-        // adversary or corruption could.
         let mut sb = synth("sha256", 1, 1, 4096, 4096, 32, &[0xAA; 32]);
         for b in &mut sb[32..64] {
             *b = b'x';
         }
         let r = ValidatedVeritySuperblock::parse(&sb, 0);
         assert!(
-            matches!(&r, Err(CarapaceError::SuperblockInvalid { reason, .. }) if reason.contains("NUL")),
-            "expected SuperblockInvalid('...NUL...'), got {r:?}"
+            matches!(&r, Err(e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("NUL")),
+            "expected InvalidData('...NUL...'), got {r:?}"
         );
     }
 }

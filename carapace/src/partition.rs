@@ -6,40 +6,18 @@
 //! No udev required — `udev` populates `/dev/disk/by-partuuid/*` symlinks
 //! from this same data, but the data itself comes from the kernel's GPT
 //! parser at `losetup --partscan` (or disk attach) time.
-//!
-//! For each `/sys/class/block/<X>` whose `uevent` declares
-//! `DEVTYPE=partition`, the kernel emits `PARTUUID=<textual-uuid>` and
-//! `MAJOR=<n>/MINOR=<m>`. [`PartitionMap::scan`] reads them all in one
-//! pass into a HashMap so the chain walker can do O(1) lookups instead
-//! of paying a full `/sys/class/block` walk per scute (lane 08 HOT-3).
 
 use crate::verity::superblock::VERITY_SUPERBLOCK_SIZE;
-use crate::CarapaceError;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 /// One partition's identity + locator.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedPartition {
-    /// Block-device path under `/dev` (e.g. `/dev/loop3p2`,
-    /// `/dev/sda7`).
+    /// Block-device path under `/dev` (e.g. `/dev/loop3p2`, `/dev/sda7`).
     pub path: PathBuf,
-    /// Major:minor for use in dm tables via the `<maj>:<min>` shortcut
-    /// (avoids a udev sync round-trip on the consumer side).
-    pub major: u32,
-    pub minor: u32,
-}
-
-impl ResolvedPartition {
-    /// `(major, minor)` for use as the `<maj>:<min>` device argument in
-    /// a dm-table line. Returns the raw pair so the caller (dm-table
-    /// renderer) can format on demand without an intermediate `PathBuf`
-    /// allocation. Same shape as `DmDevice::dev_ref`.
-    pub(crate) fn dev_ref(&self) -> (u32, u32) {
-        (self.major, self.minor)
-    }
 }
 
 /// Pluggable resolver for the chain walker. The default impl is
@@ -47,43 +25,23 @@ impl ResolvedPartition {
 /// `&dyn ChainResolver` so unit tests can substitute an in-memory
 /// fake without touching `/sys/class/block` or doing real disk I/O.
 pub(crate) trait ChainResolver {
-    /// Look up the data partition for a scute. Returns just the
-    /// location info — there's no parser-validated structure on data
-    /// partitions; dm-verity verifies their content at activation
-    /// time.
-    fn resolve_data(&self, partuuid: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError>;
-
-    /// Look up the hash partition AND read its 4 KiB superblock
-    /// area in one call. Tying the I/O to resolution keeps the
-    /// walker's I/O surface to a single trait method (and lets the
-    /// mock just hand back pre-built bytes).
+    fn resolve_data(&self, partuuid: &[u8; 16]) -> io::Result<&ResolvedPartition>;
     fn resolve_hash(
         &self,
         partuuid: &[u8; 16],
-    ) -> Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE]), CarapaceError>;
+    ) -> io::Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])>;
 }
 
 /// All carapace-relevant GPT partitions visible to the kernel,
-/// indexed by raw PARTUUID. Built once per attach via [`Self::scan`];
-/// the chain walker then does O(1) lookups via [`Self::find`] instead
-/// of a full sysfs walk per scute.
+/// indexed by raw PARTUUID.
 #[derive(Debug, Default)]
 pub(crate) struct PartitionMap {
     by_partuuid: HashMap<[u8; 16], ResolvedPartition>,
 }
 
 impl PartitionMap {
-    /// Walk `/sys/class/block` once. Skips entries that are not
-    /// partitions, lack a PARTUUID, or have malformed uevents.
-    ///
-    /// Reuses three buffers (the sysfs path, the dev path, and the
-    /// uevent body) across iterations so the per-partition allocation
-    /// cost is bounded — the previous shape's `entry.path()`,
-    /// `.join("uevent")`, `read_to_string`, and `format!("/dev/{name}")`
-    /// allocated a fresh PathBuf/String per iteration even for
-    /// non-carapace partitions, dominating attach-time allocator
-    /// pressure on systems with many block devices.
-    pub(crate) fn scan() -> Result<Self, CarapaceError> {
+    /// Walk `/sys/class/block` once.
+    pub(crate) fn scan() -> io::Result<Self> {
         let mut by_partuuid = HashMap::new();
         let mut sysfs_path = PathBuf::from("/sys/class/block");
         let mut dev_path = PathBuf::from("/dev");
@@ -96,13 +54,12 @@ impl PartitionMap {
                 continue;
             };
 
-            // sysfs_path = /sys/class/block/<name>/uevent (reused).
             sysfs_path.push(name);
             sysfs_path.push("uevent");
             uevent_buf.clear();
             let read_ok = File::open(&sysfs_path).and_then(|mut f| f.read_to_end(&mut uevent_buf));
-            sysfs_path.pop(); // remove "uevent"
-            sysfs_path.pop(); // remove <name>
+            sysfs_path.pop();
+            sysfs_path.pop();
             if read_ok.is_err() {
                 continue;
             }
@@ -110,54 +67,46 @@ impl PartitionMap {
             let Ok(uevent) = std::str::from_utf8(&uevent_buf) else {
                 continue;
             };
-            let Some((partuuid_text, major, minor)) = parse_partition_uevent(uevent) else {
+            // Check it's a partition with a PARTUUID; major/minor not stored.
+            let Some((partuuid_text, _major, _minor)) = parse_partition_uevent(uevent) else {
                 continue;
             };
             let Some(raw) = textual_partuuid_to_raw(partuuid_text) else {
                 continue;
             };
 
-            // Final dev path for the matching partition. The clone
-            // gives the HashMap entry an owned PathBuf; the reusable
-            // dev_path drops back to "/dev" via pop() for the next
-            // iteration. One alloc per matching partition (~5-10),
-            // not per visible partition (~125).
             dev_path.push(name);
             let path = dev_path.clone();
             dev_path.pop();
 
-            by_partuuid.insert(raw, ResolvedPartition { path, major, minor });
+            by_partuuid.insert(raw, ResolvedPartition { path });
         }
         Ok(Self { by_partuuid })
     }
 
     /// Look up a partition by raw 16-byte PARTUUID.
-    pub(crate) fn find(&self, partuuid: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError> {
+    pub(crate) fn find(&self, partuuid: &[u8; 16]) -> io::Result<&ResolvedPartition> {
         self.by_partuuid
             .get(partuuid)
-            .ok_or_else(|| CarapaceError::PartitionNotFound {
-                partuuid: raw_partuuid_to_text(partuuid),
-            })
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("partition not found: PARTUUID {}", raw_partuuid_to_text(partuuid)),
+            ))
     }
 }
 
 impl ChainResolver for PartitionMap {
-    fn resolve_data(&self, partuuid: &[u8; 16]) -> Result<&ResolvedPartition, CarapaceError> {
+    fn resolve_data(&self, partuuid: &[u8; 16]) -> io::Result<&ResolvedPartition> {
         self.find(partuuid)
     }
 
     fn resolve_hash(
         &self,
         partuuid: &[u8; 16],
-    ) -> Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE]), CarapaceError> {
+    ) -> io::Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])> {
         use std::fs::OpenOptions;
-        use std::io::Read;
 
         let part = self.find(partuuid)?;
-        // Verity superblock at offset 0 of the hash partition (kernel
-        // ABI: veritysetup format --format=1 places it there). The
-        // superblock is exactly 512 B; we read just that — saves a 4 KiB
-        // stack copy on the resolver return path and 8x the read I/O.
         let mut f = OpenOptions::new().read(true).open(&part.path)?;
         let mut buf = [0u8; VERITY_SUPERBLOCK_SIZE];
         f.read_exact(&mut buf)?;
@@ -166,9 +115,6 @@ impl ChainResolver for PartitionMap {
 }
 
 /// Parse `DEVTYPE`/`PARTUUID`/`MAJOR`/`MINOR` from a uevent body.
-/// Returns `None` unless DEVTYPE=partition AND all three target fields
-/// are present and parseable. Borrows the PARTUUID text out of the
-/// passed slice (no allocation).
 fn parse_partition_uevent(uevent: &str) -> Option<(&str, u32, u32)> {
     let mut is_partition = false;
     let mut partuuid: Option<&str> = None;
@@ -189,12 +135,7 @@ fn parse_partition_uevent(uevent: &str) -> Option<(&str, u32, u32)> {
 }
 
 /// Convert raw 16-byte PARTUUID (mixed-endian, as stored in the GPT)
-/// into the textual UUID form the kernel emits in
-/// `/sys/class/block/<X>/uevent`'s `PARTUUID` field.
-///
-/// Mixed-endian: first 3 fields little-endian on disk → reversed in
-/// textual form; last 2 big-endian → no swap. Same convention used by
-/// every UUID printer on Linux for GPT PARTUUIDs (sgdisk, blkid, udev).
+/// into the textual UUID form the kernel emits.
 pub(crate) fn raw_partuuid_to_text(raw: &[u8; 16]) -> String {
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -206,10 +147,8 @@ pub(crate) fn raw_partuuid_to_text(raw: &[u8; 16]) -> String {
     )
 }
 
-/// Inverse of [`raw_partuuid_to_text`]. Returns `None` if the input
-/// is not a textual UUID (8-4-4-4-12 lowercase hex with dashes).
+/// Inverse of [`raw_partuuid_to_text`].
 fn textual_partuuid_to_raw(text: &str) -> Option<[u8; 16]> {
-    // Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars, 4 dashes).
     let bytes = text.as_bytes();
     if bytes.len() != 36
         || bytes[8] != b'-'
@@ -228,12 +167,6 @@ fn textual_partuuid_to_raw(text: &str) -> Option<[u8; 16]> {
         }
     };
     let hex_byte = |hi: u8, lo: u8| -> Option<u8> { Some((nibble(hi)? << 4) | nibble(lo)?) };
-    // Field byte offsets in the textual form (skipping dashes).
-    // 0..8     : field1 (4 LE bytes on disk → reverse)
-    // 9..13    : field2 (2 LE bytes on disk → reverse)
-    // 14..18   : field3 (2 LE bytes on disk → reverse)
-    // 19..23   : field4 (2 BE bytes on disk → no swap)
-    // 24..36   : field5 (6 BE bytes on disk → no swap)
     let mut raw = [0u8; 16];
     let f1 = [
         hex_byte(bytes[0], bytes[1])?,
@@ -275,11 +208,6 @@ mod tests {
 
     #[test]
     fn raw_to_text_round_trips_through_known_vectors() {
-        // Two random v4 GUIDs (the carapace-data and carapace-hash
-        // partition type GUIDs from tests/fixtures/build_carapace.sh).
-        // Pinned here as the canonical mixed-endian witness — if a
-        // future contributor "fixes" the byte order in raw_to_text,
-        // these assertions catch it.
         let scute_data_raw: [u8; 16] = [
             0x11, 0xdd, 0x80, 0x4a, 0xe1, 0xbf, 0x4a, 0xb3, 0x98, 0xc1, 0xf9, 0xf4, 0x8c, 0xee,
             0xdb, 0xf1,
@@ -300,8 +228,6 @@ mod tests {
 
     #[test]
     fn raw_text_round_trip() {
-        // Property: text → raw → text is the identity for both pinned
-        // GUIDs above and a handful of arbitrary ones.
         for raw in [
             [
                 0x11u8, 0xdd, 0x80, 0x4a, 0xe1, 0xbf, 0x4a, 0xb3, 0x98, 0xc1, 0xf9, 0xf4, 0x8c,
@@ -318,12 +244,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_partuuid_is_partition_not_found_error() {
+    fn unknown_partuuid_is_not_found_error() {
         let map = PartitionMap::scan().unwrap();
         let r = map.find(&[0xFF; 16]);
         assert!(
-            matches!(r, Err(CarapaceError::PartitionNotFound { .. })),
-            "expected PartitionNotFound, got {r:?}"
+            matches!(r, Err(ref e) if e.kind() == io::ErrorKind::NotFound),
+            "expected NotFound, got {r:?}"
         );
     }
 
@@ -336,7 +262,6 @@ mod tests {
 
     #[test]
     fn parse_partition_uevent_rejects_disk() {
-        // DEVTYPE=disk (not partition) → None even with all other fields.
         let body =
             "MAJOR=8\nMINOR=0\nDEVTYPE=disk\nPARTUUID=4a80dd11-bfe1-b34a-98c1-f9f48ceedbf1\n";
         assert!(parse_partition_uevent(body).is_none());
@@ -344,19 +269,15 @@ mod tests {
 
     #[test]
     fn parse_partition_uevent_missing_fields() {
-        // Missing PARTUUID.
         assert!(parse_partition_uevent("MAJOR=259\nMINOR=3\nDEVTYPE=partition\n").is_none());
-        // Missing MAJOR.
         assert!(parse_partition_uevent(
             "MINOR=3\nDEVTYPE=partition\nPARTUUID=4a80dd11-bfe1-b34a-98c1-f9f48ceedbf1\n"
         )
         .is_none());
-        // Missing DEVTYPE entirely.
         assert!(parse_partition_uevent(
             "MAJOR=259\nMINOR=3\nPARTUUID=4a80dd11-bfe1-b34a-98c1-f9f48ceedbf1\n"
         )
         .is_none());
-        // Unparseable MAJOR.
         assert!(parse_partition_uevent(
             "MAJOR=xx\nMINOR=3\nDEVTYPE=partition\nPARTUUID=4a80dd11-bfe1-b34a-98c1-f9f48ceedbf1\n"
         )

@@ -1,64 +1,86 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CLI entry point. Two verbs: `attach` and `detach`. All-named
-//! arguments, no positionals (matches v1 spec). Hand-rolled parser —
-//! lane 04 found the `clap` derive feature pulled 16 transitive crates
-//! and ~38% of the release `.text` for two verbs and three flags;
-//! that's the textbook case for not earning its keep.
-//!
-//! This module is the binary's CLI shell only: it parses arguments and
-//! delegates to the `carapace` library ([`carapace::attach`] /
-//! [`carapace::detach`]), then handles process-level concerns (stdout/stderr,
-//! exit codes). No chain or dm logic lives here.
+//! CLI entry point. Single verb: `mount`. Hand-rolled parser — no clap.
 
-use carapace::{validate_dm_name, CarapaceError};
+use std::io;
 use std::process::ExitCode;
 
+#[cfg(feature = "gpt")]
+use std::path::PathBuf;
+
+#[cfg(feature = "gpt")]
+use carapace::{Chain, FromGpt};
+
+/// Decode hex string (with optional 0x prefix, whitespace trimmed) to bytes.
+#[cfg(feature = "gpt")]
+fn decode_hex(s: &str) -> io::Result<Vec<u8>> {
+    let s = s.trim();
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if !s.len().is_multiple_of(2) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("hex string has odd length: {} chars", s.len()),
+        ));
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for i in (0..s.len()).step_by(2) {
+        let byte = u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("invalid hex: {e}"))
+        })?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
 const HELP: &str = "\
-carapace — assemble (read) carapace block-device chains.
+carapace — assemble carapace block-device chains (read-side).
 
 USAGE:
-    carapace attach --name <NAME> --root <HEX>
-    carapace detach --name <NAME>
+    carapace mount <root-hex> <dir> [--type <fs>]
     carapace --help
     carapace --version
 
-FLAGS:
-    -n, --name <NAME>    Operator-visible /dev/mapper/<NAME>
-    -r, --root <HEX>     Trusted chain root, lowercase hex (\u{2265} 64 chars)
+ARGS:
+    <root-hex>   Trusted chain root, hex-encoded (>= 64 hex chars for sha256).
+    <dir>        Mount point directory.
 
-attach walks the chain backward from --root, validates parameters
-against the RDP whitelist, builds the dm stack, and prints the
-operator-visible /dev/mapper/<name> path on success. Partitions are
-discovered by PARTUUID lookup against /sys/class/block/*/uevent —
-every visible GPT-partscanned block device contributes; no --storage
-flag and no GPT parser.
+OPTIONS:
+    --type <fs>  Filesystem type passed to mount(8). Optional; auto-detected
+                 if omitted.
 
-detach is best-effort removal of every dm device prefixed <NAME>.
+`carapace mount` walks the chain backward from <root-hex> via PARTUUID
+lookup in /sys/class/block/*/uevent, validates each scute against the RDP
+whitelist, builds the dm-verity + dm-snapshot stack, then mounts the top
+device read-only at <dir>. On success the dm stack is anchored by the
+mount; `umount <dir>` tears it down via deferred-remove.
 ";
 
 pub(crate) fn run() -> ExitCode {
-    let result = parse_and_dispatch(std::env::args().skip(1));
-    match result {
+    match parse_and_dispatch(std::env::args().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("carapace: {e}");
-            // 2 for chain-rejection (initrd can fail-closed cleanly);
-            // 1 for operational failure (kernel ioctl, I/O, CLI usage).
-            if e.is_adversary_rejection() {
-                ExitCode::from(2)
-            } else {
-                ExitCode::FAILURE
-            }
+            ExitCode::FAILURE
         }
     }
 }
 
-fn parse_and_dispatch(mut args: impl Iterator<Item = String>) -> Result<(), CarapaceError> {
+#[cfg(feature = "gpt")]
+#[derive(Debug)]
+struct MountArgs {
+    root_hex: String,
+    dir: PathBuf,
+    fstype: Option<String>,
+}
+
+fn parse_and_dispatch(mut args: impl Iterator<Item = String>) -> io::Result<()> {
     let Some(verb) = args.next() else {
         eprint!("{HELP}");
-        return Err(CarapaceError::Usage("missing verb".into()));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "missing verb"));
     };
     match verb.as_str() {
         "-h" | "--help" => {
@@ -69,77 +91,89 @@ fn parse_and_dispatch(mut args: impl Iterator<Item = String>) -> Result<(), Cara
             println!("carapace {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        "attach" => {
-            let (name, root) = parse_attach(args)?;
-            let path = carapace::attach(&name, &root)?;
-            println!("{}", path.display());
-            Ok(())
-        }
-        "detach" => {
-            let name = parse_detach(args)?;
-            // detach is best-effort; print any residual per-device problems
-            // (the library returns them rather than printing) and still
-            // succeed, matching `dmsetup remove -f`.
-            for problem in carapace::detach(&name)? {
-                eprintln!("carapace detach: {problem}");
+        "mount" => {
+            #[cfg(feature = "gpt")]
+            {
+                let mount_args = parse_mount(args)?;
+                do_mount(mount_args)
             }
-            Ok(())
+            #[cfg(not(feature = "gpt"))]
+            {
+                let _ = args;
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the `mount` verb requires the `gpt` feature (enabled by default)",
+                ))
+            }
         }
-        other => Err(CarapaceError::Usage(format!(
-            "unknown verb {other:?} (expected `attach`, `detach`, `--help`, or `--version`)"
-        ))),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown verb {other:?} (expected `mount`, `--help`, or `--version`)"),
+        )),
     }
 }
 
-fn parse_attach(args: impl Iterator<Item = String>) -> Result<(String, String), CarapaceError> {
-    let mut name: Option<String> = None;
-    let mut root: Option<String> = None;
-    let mut iter = args.peekable();
-    while let Some(arg) = iter.next() {
+#[cfg(feature = "gpt")]
+fn parse_mount(mut args: impl Iterator<Item = String>) -> io::Result<MountArgs> {
+    let root_hex = args.next().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "mount: missing <root-hex>")
+    })?;
+    let dir = args.next().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "mount: missing <dir>")
+    })?;
+    let mut fstype: Option<String> = None;
+    while let Some(arg) = args.next() {
         match arg.as_str() {
-            "-n" | "--name" => name = Some(value_for(&arg, iter.next())?),
-            "-r" | "--root" => root = Some(value_for(&arg, iter.next())?),
-            "-h" | "--help" => {
-                print!("{HELP}");
-                std::process::exit(0);
+            "--type" | "-t" => {
+                let val = args.next().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{arg} requires a value"),
+                    )
+                })?;
+                fstype = Some(val);
             }
             other => {
-                return Err(CarapaceError::Usage(format!(
-                    "attach: unexpected argument {other:?}"
-                )));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("mount: unexpected argument {other:?}"),
+                ));
             }
         }
     }
-    let name = name.ok_or_else(|| CarapaceError::Usage("attach: --name is required".into()))?;
-    validate_dm_name(&name)?;
-    let root = root.ok_or_else(|| CarapaceError::Usage("attach: --root is required".into()))?;
-    Ok((name, root))
+    Ok(MountArgs {
+        root_hex,
+        dir: PathBuf::from(dir),
+        fstype,
+    })
 }
 
-fn parse_detach(args: impl Iterator<Item = String>) -> Result<String, CarapaceError> {
-    let mut name: Option<String> = None;
-    let mut iter = args.peekable();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-n" | "--name" => name = Some(value_for(&arg, iter.next())?),
-            "-h" | "--help" => {
-                print!("{HELP}");
-                std::process::exit(0);
-            }
-            other => {
-                return Err(CarapaceError::Usage(format!(
-                    "detach: unexpected argument {other:?}"
-                )));
-            }
-        }
+#[cfg(feature = "gpt")]
+fn do_mount(args: MountArgs) -> io::Result<()> {
+    let root = decode_hex(&args.root_hex)?;
+    let chain = Chain::from_gpt(&root)?;
+    let removed = chain.assemble()?;
+    let minor = removed.id().minor();
+    let dev_path = format!("/dev/dm-{minor}");
+
+    let mut cmd = std::process::Command::new("mount");
+    cmd.arg("-o").arg("ro");
+    if let Some(ref t) = args.fstype {
+        cmd.arg("-t").arg(t);
     }
-    let name = name.ok_or_else(|| CarapaceError::Usage("detach: --name is required".into()))?;
-    validate_dm_name(&name)?;
-    Ok(name)
-}
+    cmd.arg(&dev_path).arg(&args.dir);
 
-fn value_for(flag: &str, value: Option<String>) -> Result<String, CarapaceError> {
-    value.ok_or_else(|| CarapaceError::Usage(format!("{flag} requires a value")))
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "mount failed with exit code: {status}"
+        )));
+    }
+
+    // Drop the Removed guard: the mount now anchors the dm stack.
+    // DM_DEFERRED_REMOVE is scheduled; the stack tears down on umount.
+    drop(removed);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -154,61 +188,60 @@ mod tests {
             .into_iter()
     }
 
+    #[cfg(feature = "gpt")]
     #[test]
-    fn parse_attach_long_form() {
-        let (n, r) = parse_attach(args(&["--name", "root", "--root", "deadbeef"])).unwrap();
-        assert_eq!(n, "root");
-        assert_eq!(r, "deadbeef");
+    fn parse_mount_requires_root_hex() {
+        let e = parse_mount(args(&[])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(feature = "gpt")]
+    #[test]
+    fn parse_mount_requires_dir() {
+        let e = parse_mount(args(&["deadbeef"])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(feature = "gpt")]
+    #[test]
+    fn parse_mount_accepts_type() {
+        let a = parse_mount(args(&["deadbeef", "/mnt", "--type", "ext4"])).unwrap();
+        assert_eq!(a.root_hex, "deadbeef");
+        assert_eq!(a.dir, PathBuf::from("/mnt"));
+        assert_eq!(a.fstype, Some("ext4".into()));
+    }
+
+    #[cfg(feature = "gpt")]
+    #[test]
+    fn parse_mount_accepts_short_type_flag() {
+        let a = parse_mount(args(&["deadbeef", "/mnt", "-t", "squashfs"])).unwrap();
+        assert_eq!(a.fstype, Some("squashfs".into()));
+    }
+
+    #[cfg(feature = "gpt")]
+    #[test]
+    fn parse_mount_no_fstype() {
+        let a = parse_mount(args(&["deadbeef", "/mnt"])).unwrap();
+        assert_eq!(a.fstype, None);
+    }
+
+    #[cfg(feature = "gpt")]
+    #[test]
+    fn parse_mount_rejects_unknown_flag() {
+        let e = parse_mount(args(&["deadbeef", "/mnt", "--bogus"])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(feature = "gpt")]
+    #[test]
+    fn parse_mount_rejects_type_missing_value() {
+        let e = parse_mount(args(&["deadbeef", "/mnt", "--type"])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
-    fn parse_attach_short_form() {
-        let (n, r) = parse_attach(args(&["-n", "root", "-r", "deadbeef"])).unwrap();
-        assert_eq!(n, "root");
-        assert_eq!(r, "deadbeef");
-    }
-
-    #[test]
-    fn parse_attach_flag_order_is_arbitrary() {
-        let (n, r) = parse_attach(args(&["--root", "deadbeef", "--name", "root"])).unwrap();
-        assert_eq!(n, "root");
-        assert_eq!(r, "deadbeef");
-    }
-
-    #[test]
-    fn parse_attach_rejects_missing_required() {
-        assert!(matches!(
-            parse_attach(args(&["--name", "root"])),
-            Err(CarapaceError::Usage(_))
-        ));
-        assert!(matches!(
-            parse_attach(args(&["--root", "deadbeef"])),
-            Err(CarapaceError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn parse_attach_rejects_unknown_flag() {
-        assert!(matches!(
-            parse_attach(args(&["--name", "x", "--root", "y", "--bogus"])),
-            Err(CarapaceError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn parse_attach_rejects_value_missing_for_flag() {
-        assert!(matches!(
-            parse_attach(args(&["--name"])),
-            Err(CarapaceError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn parse_detach_requires_name() {
-        assert_eq!(parse_detach(args(&["--name", "root"])).unwrap(), "root");
-        assert!(matches!(
-            parse_detach(args(&[])),
-            Err(CarapaceError::Usage(_))
-        ));
+    fn unknown_verb_returns_invalid_input() {
+        let e = parse_and_dispatch(args(&["detach"])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 }

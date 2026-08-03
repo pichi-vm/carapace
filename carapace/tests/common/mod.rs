@@ -18,8 +18,11 @@
 
 #![allow(dead_code)]
 
+use carapace::{Chain, FromGpt, Removed};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Output of [`build_chain`].
 pub(crate) struct BuiltChain {
@@ -40,10 +43,12 @@ pub(crate) struct AttachedImage {
 }
 
 impl AttachedImage {
-    /// `losetup --partscan` the image. Partscan is synchronous: by the
-    /// time `losetup` returns, the kernel has parsed the GPT and
-    /// populated `/sys/class/block/loopXpN/uevent` with `PARTUUID=...`.
-    /// No udev round-trip required.
+    /// `losetup --partscan` the image, then wait for the kernel to publish
+    /// the partition entries in `/sys/class/block/loopXpN/uevent`. Partscan
+    /// creates the partitions, but `losetup` can return a beat before sysfs
+    /// is fully populated — which races the PARTUUID discovery scan and makes
+    /// discovery intermittently miss a partition. [`wait_for_partitions`]
+    /// polls until the entries settle so the test is deterministic.
     pub(crate) fn attach(image: &Path) -> Self {
         let out = Command::new("losetup")
             .args(["--show", "-f", "--partscan"])
@@ -58,7 +63,52 @@ impl AttachedImage {
             String::from_utf8_lossy(&out.stderr)
         );
         let loop_path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        wait_for_partitions(&loop_path);
         Self { loop_path }
+    }
+}
+
+/// Poll `/sys/class/block` until this loop's GPT partitions appear with
+/// `PARTUUID=` and their count is stable across two checks (partscan adds
+/// them in one pass, so a stable non-zero count means all are published).
+/// Bounded by a 5 s deadline; on timeout it returns and lets discovery
+/// surface a clear "partition not found" error.
+fn wait_for_partitions(loop_path: &Path) {
+    let base = loop_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let prefix = format!("{base}p");
+    let ready = || -> usize {
+        let Ok(rd) = std::fs::read_dir("/sys/class/block") else {
+            return 0;
+        };
+        rd.filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .filter(|e| {
+                std::fs::read_to_string(e.path().join("uevent"))
+                    .map(|s| s.contains("PARTUUID="))
+                    .unwrap_or(false)
+            })
+            .count()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut prev = 0usize;
+    loop {
+        let now = ready();
+        if now > 0 && now == prev {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        prev = now;
+        std::thread::sleep(std::time::Duration::from_millis(30));
     }
 }
 
@@ -157,11 +207,18 @@ pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Decode `root_hex` and call `Chain::from_gpt(&bytes)?.assemble()`.
+pub(crate) fn assemble_from_hex(root_hex: &str) -> io::Result<Removed> {
+    let bytes = decode_hex(root_hex)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    Chain::from_gpt(&bytes)?.assemble()
+}
+
 /// Poll `losetup -l` until no loop is bound to `image_path`. Returns
 /// true iff a loop is still bound after `timeout`. Tests use this for
 /// the post-detach assertion (LOOP_CLR_FD is acked synchronously but
 /// completed asynchronously; single-shot losetup races on Ubuntu).
-pub(crate) fn loop_bound_to(image: &Path, timeout: std::time::Duration) -> bool {
+pub(crate) fn loop_bound_to(image: &Path, timeout: Duration) -> bool {
     let needle = image.to_string_lossy().to_string();
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -175,27 +232,48 @@ pub(crate) fn loop_bound_to(image: &Path, timeout: std::time::Duration) -> bool 
         if std::time::Instant::now() >= deadline {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Poll `dmsetup ls` until no `CARAPACE-*` device remains. Returns
+/// true iff a CARAPACE device is still present after `timeout`.
+pub(crate) fn carapace_devices_present(timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let present = match Command::new("dmsetup").arg("ls").output() {
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.starts_with("CARAPACE-")),
+            Err(_) => false,
+        };
+        if !present {
+            return false;
+        }
+        if std::time::Instant::now() >= deadline {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
 /// Mount the assembled mapper device read-only, run `f` against the
 /// mountpoint, then unmount. Panics on mount/unmount failure.
-pub(crate) fn with_mounted<F, R>(mapper: &Path, f: F) -> R
+pub(crate) fn with_mounted<F, R>(dev: &Path, f: F) -> R
 where
     F: FnOnce(&Path) -> R,
 {
     let mnt = tempfile::tempdir().expect("tempdir for mount");
     let status = Command::new("mount")
         .args(["-o", "ro"])
-        .arg(mapper)
+        .arg(dev)
         .arg(mnt.path())
         .status()
         .expect("spawn mount");
     assert!(
         status.success(),
         "mount {} -> {} failed: {status:?}",
-        mapper.display(),
+        dev.display(),
         mnt.path().display()
     );
     let result = f(mnt.path());
@@ -210,28 +288,27 @@ where
     result
 }
 
-/// Best-effort dm cleanup for a top-level name (used in test
-/// teardown to avoid polluting subsequent tests). Probe count must
-/// match the production walker's `chain::MAX_CHAIN_DEPTH` so a test
-/// using a long fixture can't leak devices the cleanup never visits.
-/// Hardcoded to 32 here because integration tests can only see the
-/// crate's `pub` surface and `MAX_CHAIN_DEPTH` is `pub(crate)`. Drift
-/// risk is bounded: the constant rarely changes, and lib unit tests
-/// would break long before the drift mattered.
-const CLEANUP_PROBE_DEPTH: usize = 32;
-
-pub(crate) fn cleanup_dm(name: &str) {
-    let _ = Command::new("dmsetup")
-        .args(["remove", "-f", name])
-        .output();
-    for i in (0..CLEANUP_PROBE_DEPTH).rev() {
-        for prefix in ["s", "v"] {
-            let _ = Command::new("dmsetup")
-                .args(["remove", "-f", &format!("{name}-{prefix}{i}")])
-                .output();
-        }
+/// Best-effort cleanup of all `CARAPACE-*` dm devices. Enumerates
+/// `dmsetup ls` and removes every device whose name starts with
+/// `CARAPACE-`. Used in test teardown to avoid polluting subsequent tests.
+pub(crate) fn cleanup_dm() {
+    let Ok(out) = Command::new("dmsetup").arg("ls").output() else {
+        return;
+    };
+    let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let name = line.split_whitespace().next()?;
+            if name.starts_with("CARAPACE-") {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for name in names {
+        let _ = Command::new("dmsetup")
+            .args(["remove", "-f", &name])
+            .output();
     }
-    let _ = Command::new("dmsetup")
-        .args(["remove", "-f", &format!("{name}-z0")])
-        .output();
 }
