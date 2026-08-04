@@ -12,7 +12,7 @@ root). See [`carapace/SPEC.md`](carapace/SPEC.md).
 - **`carapace`** — the read library (`Chain`/`Layer`/`FromGpt`/`assemble`) +
   the `carapace` CLI (`mount` verb).
 - **`devmap`** — the device-mapper ioctl layer (chain-agnostic).
-- **`loopdev`** (`lodown`) — safe loop-device wrapper for file-backed layers.
+- **`lodown`** — safe loop-device wrapper for file-backed layers.
 
 ## Library API
 
