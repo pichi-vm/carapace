@@ -89,11 +89,6 @@ impl Chain {
 
     pub(crate) fn assemble_sync(&self) -> io::Result<File> {
         let prepared = self.prepare()?;
-        // All Carapace assemblers lock the same control node, including across
-        // processes. This makes create/load/resume/reuse a single publication
-        // operation. Closing this independent fd releases the advisory lock.
-        let lock = File::open("/dev/mapper/control")?;
-        lock.lock()?;
         let assembler = Assembler {
             control: Control::open()?,
         };
@@ -185,16 +180,48 @@ impl Assembler {
     where
         T: Target<Table = T> + Clone + PartialEq,
     {
+        self.activate_inner(
+            name,
+            sectors,
+            target,
+            #[cfg(test)]
+            &mut |_| Ok(()),
+        )
+    }
+
+    fn activate_inner<T>(
+        &self,
+        name: &str,
+        sectors: u64,
+        target: T,
+        #[cfg(test)] observe: &mut impl FnMut(ActivationStage) -> io::Result<()>,
+    ) -> io::Result<File>
+    where
+        T: Target<Table = T> + Clone + PartialEq,
+    {
+        // An independent open file description is required for flock exclusion
+        // between assemblers in the same process as well as across processes.
+        // Only publication is serialized; layer I/O and attachment happen outside.
+        // Returned files pin each mapping across the unlocked gaps between layers.
+        let lock = File::open("/dev/mapper/control")?;
+        lock.lock()?;
         for _ in 0..8 {
             match self.control.create(name) {
                 Ok(device) => {
                     let guard = device.guard();
+                    #[cfg(test)]
+                    observe(ActivationStage::Created)?;
                     guard
                         .builder()
                         .read_only()
                         .add(0, sectors, target.clone())?
                         .load()?;
                     guard.resume()?;
+                    #[cfg(test)]
+                    observe(ActivationStage::Resumed)?;
+                    // Keep exclusion until the file pins the mapping and the
+                    // rollback guard is disarmed. On error, guard cleanup runs
+                    // before the earlier-declared lock file closes.
                     return guard.defer(OpenOptions::new().read(true));
                 }
                 Err(error)
@@ -207,6 +234,8 @@ impl Assembler {
             // Deferred removal can race lookup/open even under the setup lock:
             // existing consumers close their files without acquiring it.
             let existing = self.control.by_name(name).and_then(|(device, _)| {
+                #[cfg(test)]
+                observe(ActivationStage::LookedUp)?;
                 let file = File::open(device.node_path())?;
                 Ok((device, file))
             });
@@ -215,6 +244,11 @@ impl Assembler {
                 Err(error) if matches!(error.raw_os_error(), Some(2 | 6 | 19)) => continue,
                 Err(error) => return Err(error),
             };
+            // The open file prevents deferred teardown. Cooperating assemblers
+            // never modify an existing table, so validation needs no lock.
+            drop(lock);
+            #[cfg(test)]
+            observe(ActivationStage::Pinned)?;
             let status = device.status()?;
             let required = Status::READ_ONLY | Status::ACTIVE_TABLE;
             if status.flags & required != required
@@ -251,9 +285,204 @@ impl Assembler {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationStage {
+    Created,
+    Resumed,
+    LookedUp,
+    Pinned,
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn kernel_assembler() -> Option<Assembler> {
+        match Control::open() {
+            Ok(control) => Some(Assembler { control }),
+            Err(error) => {
+                assert!(
+                    std::env::var_os("CARAPACE_REQUIRE_DM_TESTS").is_none(),
+                    "{error}"
+                );
+                eprintln!("skip: device-mapper access required: {error}");
+                None
+            }
+        }
+    }
+
+    fn publication_lock_available() -> bool {
+        match File::open("/dev/mapper/control").unwrap().try_lock() {
+            Ok(()) => true,
+            Err(std::fs::TryLockError::WouldBlock) => false,
+            Err(error) => panic!("probe publication lock: {error}"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn kernel_publication_holds_lock_and_rolls_back_before_unlocking() {
+        let Some(assembler) = kernel_assembler() else {
+            return;
+        };
+        let name = format!("CARAPACE-lock-rollback-{}", std::process::id());
+        let mut stages = Vec::new();
+        let error = assembler
+            .activate_inner(&name, 8, ZeroTarget, &mut |stage| {
+                stages.push(stage);
+                assert!(!publication_lock_available());
+                if stage == ActivationStage::Resumed {
+                    return Err(io::Error::other("injected publication failure"));
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "injected publication failure");
+        assert_eq!(stages, [ActivationStage::Created, ActivationStage::Resumed]);
+        assert!(publication_lock_available());
+        assert!(assembler.control.by_name(&name).is_err());
+        // The same name can be published successfully after rollback.
+        drop(assembler.activate(&name, 8, ZeroTarget).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn kernel_reuse_releases_lock_after_pinning() {
+        let Some(assembler) = kernel_assembler() else {
+            return;
+        };
+        let name = format!("CARAPACE-lock-reuse-{}", std::process::id());
+        let mut first = Some(assembler.activate(&name, 8, ZeroTarget).unwrap());
+        let id = DevId::try_from(first.as_ref().unwrap().metadata().unwrap()).unwrap();
+        let mut stages = Vec::new();
+        let second = assembler
+            .activate_inner(&name, 8, ZeroTarget, &mut |stage| {
+                stages.push(stage);
+                assert_eq!(
+                    publication_lock_available(),
+                    stage == ActivationStage::Pinned
+                );
+                if stage == ActivationStage::Pinned {
+                    // Only the reuser's file now holds the deferred mapping.
+                    // Subsequent status/table validation must still succeed.
+                    drop(first.take());
+                    assert_eq!(assembler.control.by_name(&name)?.0.id(), id);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(stages, [ActivationStage::LookedUp, ActivationStage::Pinned]);
+        assert_eq!(id, DevId::try_from(second.metadata().unwrap()).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn kernel_competitor_waits_for_publication_or_rollback() {
+        let Some(assembler) = kernel_assembler() else {
+            return;
+        };
+        for fail in [false, true] {
+            let name = format!("CARAPACE-lock-contender-{}-{fail}", std::process::id());
+            std::thread::scope(|scope| {
+                let (start_tx, start_rx) = std::sync::mpsc::channel();
+                let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let name = &name;
+                let assembler = &assembler;
+                let waiter = scope.spawn(move || {
+                    start_rx.recv().unwrap();
+                    let lock = File::open("/dev/mapper/control").unwrap();
+                    assert!(matches!(
+                        lock.try_lock(),
+                        Err(std::fs::TryLockError::WouldBlock)
+                    ));
+                    attempt_tx.send(()).unwrap();
+                    let file = if fail {
+                        lock.lock().unwrap();
+                        // Observe state at lock acquisition, not after the
+                        // initiating thread has returned from activation.
+                        assert!(assembler.control.by_name(name).is_err());
+                        None
+                    } else {
+                        Some(assembler.activate(name, 8, ZeroTarget).unwrap())
+                    };
+                    done_tx.send(()).unwrap();
+                    file
+                });
+                let result = assembler.activate_inner(name, 8, ZeroTarget, &mut |stage| {
+                    if stage == ActivationStage::Resumed {
+                        start_tx.send(()).unwrap();
+                        attempt_rx
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        assert!(matches!(
+                            done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        ));
+                        if fail {
+                            return Err(io::Error::other("injected publication failure"));
+                        }
+                    }
+                    Ok(())
+                });
+                // Also unblock the waiter if activation failed before Resumed.
+                drop(start_tx);
+                let other = waiter.join().unwrap();
+                if fail {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "injected publication failure"
+                    );
+                } else {
+                    let file = result.unwrap();
+                    assert_eq!(
+                        DevId::try_from(file.metadata().unwrap()).unwrap(),
+                        DevId::try_from(other.unwrap().metadata().unwrap()).unwrap()
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn kernel_removal_between_lookup_and_open_retries_creation() {
+        let Some(assembler) = kernel_assembler() else {
+            return;
+        };
+        let name = format!("CARAPACE-lock-disappear-{}", std::process::id());
+        let mut first = Some(assembler.activate(&name, 8, ZeroTarget).unwrap());
+        let mut stages = Vec::new();
+        let replacement = assembler
+            .activate_inner(&name, 8, ZeroTarget, &mut |stage| {
+                stages.push(stage);
+                assert!(!publication_lock_available());
+                if stage == ActivationStage::LookedUp {
+                    drop(first.take().expect("only one existing mapping"));
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while assembler.control.by_name(&name).is_ok() {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "deferred removal stalled"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            stages,
+            [
+                ActivationStage::LookedUp,
+                ActivationStage::Created,
+                ActivationStage::Resumed
+            ]
+        );
+        assert!(publication_lock_available());
+        drop(replacement);
+    }
 
     fn layer(dir: &Path, index: usize, algorithm: &str, salt: &[u8]) -> Layer {
         let data = dir.join(format!("data-{index}"));
