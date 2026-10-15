@@ -16,10 +16,12 @@
 //!
 //! - [`Chain`] — an ordered list of layers (base → top) plus a trusted root.
 //! - [`Layer`] — a data/hash path pair for one scute.
-//! - [`Chain::assemble`] — build the dm stack and return a [`Removed`] guard.
-//! - [`FromGpt`] — discover a `Chain` by PARTUUID walk (feature `gpt`).
+//! - [`Assemble::assemble`] — build the dm stack and return a [`std::fs::File`].
+//! - `FromGpt` — discover a `Chain` by PARTUUID walk (feature `gpt`).
+//! - `AsyncAssemble` — Tokio assembly returning `tokio::fs::File` (feature `tokio`).
+//! - `AsyncFromGpt` — Tokio discovery (features `gpt` + `tokio`).
 //!
-//! Re-exports: [`devmap::DevId`], [`devmap::Removed`].
+//! Re-export: [`DevId`].
 
 #![forbid(unsafe_code)]
 #![cfg(target_os = "linux")]
@@ -33,13 +35,13 @@ mod snapshot;
 mod util;
 mod verity;
 
-pub use devmap::{DevId, Removed};
+pub use devmap_linux::DevId;
 
 use std::io;
 use std::path::PathBuf;
 
 /// One scute's data + hash partition paths (owned).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Layer {
     /// Block-device or file path for the data partition.
     pub data: PathBuf,
@@ -48,9 +50,9 @@ pub struct Layer {
 }
 
 /// An ordered chain of scutes, base → top, plus the operator-supplied
-/// trusted root hash. Produced by [`FromGpt::from_gpt`] or constructed
+/// trusted root hash. Produced by `FromGpt::from_gpt` or constructed
 /// directly by an in-process caller that already knows the layer paths.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Chain {
     /// The trusted chain root (operator-supplied, out-of-band).
     pub root: Box<[u8]>,
@@ -58,15 +60,47 @@ pub struct Chain {
     pub layers: Vec<Layer>,
 }
 
-impl Chain {
-    /// Assemble the dm-verity + dm-snapshot stack for this chain and
-    /// return the top snapshot as a [`Removed`] guard. While the guard
-    /// is alive the stack is present; dropping it issues
-    /// `DM_DEFERRED_REMOVE` on the top device (the lower devices cascade
-    /// as they become un-busy). After mounting, drop the guard to anchor
-    /// teardown to `umount`.
-    pub fn assemble(&self) -> io::Result<Removed> {
-        assemble::assemble(&self.layers, &self.root)
+/// Assemble a chain into a read-only block device.
+///
+/// Import this trait for synchronous `.assemble()`. If both assembly traits
+/// are in scope, use `Assemble::assemble(&chain)` to select this operation.
+pub trait Assemble {
+    /// Returns an open device file at offset zero. Deferred removal is already
+    /// scheduled: the device remains alive while this file, a clone, a mount,
+    /// or another kernel holder retains it. Closing the last holder permits
+    /// teardown of the stack. Device identity is available through metadata.
+    fn assemble(&self) -> io::Result<std::fs::File>;
+}
+
+impl Assemble for Chain {
+    fn assemble(&self) -> io::Result<std::fs::File> {
+        self.assemble_sync()
+    }
+}
+
+/// Asynchronous assembly using Tokio's blocking pool.
+///
+/// The returned file has the same device-lifetime contract as [`Assemble`].
+/// Requires a Tokio runtime. Work starts on first poll; once started, dropping
+/// the future does not interrupt kernel operations. The worker finishes and
+/// an unclaimed result is closed, permitting teardown. Runtime shutdown can
+/// wait for a running worker. This operation copies the chain description so
+/// the worker never borrows caller-owned data.
+#[cfg(feature = "tokio")]
+pub trait AsyncAssemble {
+    /// Assemble without blocking the executor, returning a Tokio device file.
+    fn assemble(
+        &self,
+    ) -> impl std::future::Future<Output = io::Result<tokio::fs::File>> + Send + '_;
+}
+
+#[cfg(feature = "tokio")]
+impl AsyncAssemble for Chain {
+    async fn assemble(&self) -> io::Result<tokio::fs::File> {
+        let chain = self.clone();
+        blocking(move || chain.assemble_sync())
+            .await
+            .map(tokio::fs::File::from_std)
     }
 }
 
@@ -92,5 +126,145 @@ impl FromGpt for Chain {
             root: root.to_vec().into_boxed_slice(),
             layers,
         })
+    }
+}
+
+/// Discover a chain through Tokio's blocking pool.
+///
+/// Import this trait for `Chain::from_gpt(root).await`. If [`FromGpt`] is also
+/// in scope, use `<Chain as AsyncFromGpt>::from_gpt(root)`. Requires a Tokio
+/// runtime; an unpolled future performs no discovery. Once started, discovery
+/// may finish after the future is dropped. The root is copied for the worker.
+#[cfg(all(feature = "gpt", feature = "tokio"))]
+pub trait AsyncFromGpt: Sized {
+    /// Find the kernel-visible GPT partitions, ordered base to top.
+    fn from_gpt(root: &[u8]) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_;
+}
+
+#[cfg(all(feature = "gpt", feature = "tokio"))]
+impl AsyncFromGpt for Chain {
+    async fn from_gpt(root: &[u8]) -> io::Result<Self> {
+        let root = root.to_vec();
+        blocking(move || <Self as FromGpt>::from_gpt(&root)).await
+    }
+}
+
+// Shared execution boundary for discovery and assembly, preserving io errors.
+#[cfg(feature = "tokio")]
+async fn blocking<T: Send + 'static>(
+    operation: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let runtime = tokio::runtime::Handle::try_current()
+        .map_err(|error| io::Error::other(format!("Tokio runtime required: {error}")))?;
+    runtime
+        .spawn_blocking(operation)
+        .await
+        .map_err(|error| io::Error::other(format!("carapace worker failed: {error}")))?
+}
+
+#[cfg(all(test, feature = "tokio"))]
+mod async_tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::mpsc;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn assembly_future_is_send_and_returns_tokio_file() {
+        fn check(_: impl Future<Output = io::Result<tokio::fs::File>> + Send) {}
+        let chain = Chain {
+            root: vec![0; 32].into(),
+            layers: vec![],
+        };
+        check(AsyncAssemble::assemble(&chain));
+        let sync = Assemble::assemble(&chain).unwrap_err();
+        let asynchronous = runtime()
+            .block_on(AsyncAssemble::assemble(&chain))
+            .unwrap_err();
+        assert_eq!(sync.kind(), asynchronous.kind());
+        assert_eq!(sync.to_string(), asynchronous.to_string());
+    }
+
+    #[test]
+    fn unpolled_work_does_not_start() {
+        let (tx, rx) = mpsc::channel();
+        let future = blocking(move || {
+            tx.send(()).unwrap();
+            Ok(())
+        });
+        drop(future);
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    }
+
+    #[test]
+    fn missing_runtime_is_an_io_error() {
+        let mut future = Box::pin(blocking(|| Ok(())));
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready(Err(error)) = future.as_mut().poll(&mut cx) else {
+            panic!("expected runtime error")
+        };
+        assert!(error.to_string().contains("Tokio runtime required"));
+    }
+
+    #[test]
+    fn worker_errors_preserve_io_kind_and_report_panics() {
+        let rt = runtime();
+        let error = rt
+            .block_on(blocking::<()>(|| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let error = rt
+            .block_on(blocking::<()>(|| panic!("worker failure")))
+            .unwrap_err();
+        assert!(error.to_string().contains("carapace worker failed"));
+    }
+
+    #[test]
+    fn cancelled_wait_drops_the_workers_unclaimed_result() {
+        struct OnDrop(mpsc::Sender<()>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.send(()).unwrap();
+            }
+        }
+        let rt = runtime();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let mut future = Box::pin(blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(OnDrop(dropped_tx))
+        }));
+        rt.block_on(std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(future);
+        release_tx.send(()).unwrap();
+        dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[cfg(feature = "gpt")]
+    #[test]
+    fn discovery_errors_match_and_future_is_send() {
+        fn check(_: impl Future<Output = io::Result<Chain>> + Send) {}
+        check(<Chain as AsyncFromGpt>::from_gpt(&[]));
+        let sync = <Chain as FromGpt>::from_gpt(&[]).unwrap_err();
+        let asynchronous = runtime()
+            .block_on(<Chain as AsyncFromGpt>::from_gpt(&[]))
+            .unwrap_err();
+        assert_eq!(sync.kind(), asynchronous.kind());
+        assert_eq!(sync.to_string(), asynchronous.to_string());
     }
 }

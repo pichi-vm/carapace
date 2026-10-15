@@ -18,7 +18,8 @@
 
 #![allow(dead_code)]
 
-use carapace::{Chain, FromGpt, Removed};
+use carapace::{Assemble, Chain, FromGpt};
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -207,7 +208,7 @@ pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Decode `root_hex` and call `Chain::from_gpt(&bytes)?.assemble()`.
-pub(crate) fn assemble_from_hex(root_hex: &str) -> io::Result<Removed> {
+pub(crate) fn assemble_from_hex(root_hex: &str) -> io::Result<File> {
     let bytes = decode_hex(root_hex).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     Chain::from_gpt(&bytes)?.assemble()
 }

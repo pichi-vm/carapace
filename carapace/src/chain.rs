@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::io;
 
 /// Hard cap on chain depth.
-pub(crate) const MAX_CHAIN_DEPTH: usize = 32;
+use crate::assemble::MAX_CHAIN_DEPTH;
 
 /// Walk the chain starting at `trusted_root` backward via salt prefixes,
 /// returning an ordered list of `(data_path, hash_path)` pairs in BASE → TOP
@@ -48,7 +48,7 @@ pub(crate) fn walk_chain(
     let mut current_root = [0u8; 64];
     let init_len = trusted_root.len().min(current_root.len());
     current_root[..init_len].copy_from_slice(&trusted_root[..init_len]);
-    let current_root_len = init_len;
+    let current_root_len = trusted_root.len();
     let mut chain_algo: Option<Algorithm> = None;
 
     loop {
@@ -89,7 +89,7 @@ pub(crate) fn walk_chain(
         match chain_algo {
             None => {
                 chain_algo = Some(superblock.algorithm);
-                if current_root_len < digest_size {
+                if current_root_len != digest_size {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
@@ -410,6 +410,20 @@ mod tests {
                 );
             }
             other => panic!("expected algorithm mismatch error, got {other:?}"),
+        }
+    }
+    #[test]
+    fn rejects_overlong_trusted_roots() {
+        let resolver = MockResolver::default()
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb(32, &[0; 32]));
+        for length in [33, 64, 65] {
+            let mut root = root_from(0xAA, 0xBB).to_vec();
+            root.resize(length, 0);
+            assert_eq!(
+                walk_chain(&root, &resolver).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
     }
 }

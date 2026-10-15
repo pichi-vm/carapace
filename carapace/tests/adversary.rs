@@ -31,11 +31,11 @@
 //!       PARTUUID forgery: all caught by dm-verity activation (root
 //!       hash mismatch on first read).
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "gpt"))]
 
 mod common;
 
-use carapace::{Chain, FromGpt};
+use carapace::{Assemble, Chain, FromGpt};
 use common::{build_chain, cleanup_dm, decode_hex, hex_lower, AttachedImage};
 use serial_test::serial;
 use std::io;
@@ -56,7 +56,7 @@ fn is_root() -> bool {
 /// returning the first error encountered. Scenarios that fail during the
 /// GPT walk never reach assemble; scenarios that fail during assemble
 /// (re-validation) do. Both are expected to be `InvalidData`.
-fn try_assemble(root_hex: &str) -> io::Result<carapace::Removed> {
+fn try_assemble(root_hex: &str) -> io::Result<std::fs::File> {
     let bytes = decode_hex(root_hex).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let chain = Chain::from_gpt(&bytes)?;
     chain.assemble()

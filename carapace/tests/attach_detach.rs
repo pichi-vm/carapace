@@ -13,14 +13,14 @@
 //!   4. Mounts `/dev/dm-{minor}` read-only and verifies the expected
 //!      per-scute files exist with the right content (proves cross-layer
 //!      composition end to end, not just byte parsing).
-//!   5. Unmounts, then drops the `Removed` guard — DM_DEFERRED_REMOVE
+//!   5. Unmounts, then drops the device file — DM_DEFERRED_REMOVE
 //!      cascades the teardown.
 //!   6. Drops `AttachedImage` → `losetup -d`. Verifies the image is no
 //!      longer loop-bound.
 //!
 //! All tests `#[serial]` (global dm + loop namespace).
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "gpt"))]
 
 mod common;
 
@@ -66,7 +66,9 @@ fn assemble_mount_verify_teardown(test_label: &str, n_scutes: usize) {
     let removed = assemble_from_hex(&chain.trusted_root_hex)
         .unwrap_or_else(|e| panic!("assemble failed: {e}"));
 
-    let minor = removed.id().minor();
+    let minor = carapace::DevId::try_from(removed.metadata().unwrap())
+        .unwrap()
+        .minor();
     let dev_path = PathBuf::from(format!("/dev/dm-{minor}"));
     assert!(
         dev_path.exists(),
@@ -85,13 +87,13 @@ fn assemble_mount_verify_teardown(test_label: &str, n_scutes: usize) {
         }
     });
 
-    // Drop the Removed guard: DM_DEFERRED_REMOVE cascades the teardown.
+    // Drop the device file: DM_DEFERRED_REMOVE cascades the teardown.
     drop(removed);
 
     // Wait for the chain to tear down.
     assert!(
         !carapace_devices_present(Duration::from_secs(5)),
-        "CARAPACE-* devices must be gone after dropping the Removed guard"
+        "CARAPACE-* devices must be gone after dropping the device file"
     );
 
     drop(attached); // losetup -d

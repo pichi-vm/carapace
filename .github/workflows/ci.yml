@@ -47,8 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features
-      # Authoritative no-unsafe enforcement (carapace allows `unsafe` only in
-      # carapace-dm/src/uapi.rs; this grep gate is the source of truth).
+      # Defense-in-depth for the library's forbid(unsafe_code).
       - run: bash carapace/ci/grep-unsafe.sh
 
   test:
@@ -62,8 +61,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install integration test deps
         run: sudo apt-get update && sudo apt-get install -y cryptsetup-bin gdisk dmsetup e2fsprogs python3
-      - name: Unit tests
-        run: cargo test --bins
+      - name: Unit tests and feature combinations
+        run: |
+          cargo test --lib --bins
+          cargo test --no-default-features --lib --bins
+          cargo test --no-default-features --features loop --lib --bins
+          cargo test --no-default-features --features tokio --lib --bins
+          cargo test --no-default-features --features loop,tokio --lib --bins
+          cargo test --features tokio --lib --bins
+          cargo test --features loop --lib --bins
+          cargo test --all-features --lib --bins
+          cargo check --no-default-features --all-targets
+          cargo doc --all-features --no-deps
       # Integration tests build a real layered ext4 carapace and need root
       # (loop devices, device-mapper). Run as root with the runner user's
       # cargo/rustup env so the toolchain resolves under sudo.
@@ -72,4 +81,4 @@ jobs:
           sudo env "PATH=$PATH" "HOME=$HOME" \
             "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
             "RUSTFLAGS=-D warnings" \
-            cargo test --tests -- --test-threads=1
+            cargo test --all-features --tests -- --test-threads=1

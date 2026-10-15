@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::path::PathBuf;
 
 #[cfg(feature = "gpt")]
-use carapace::{Chain, FromGpt};
+use carapace::{Assemble, Chain, DevId, FromGpt};
 
 /// Decode hex string (with optional 0x prefix, whitespace trimmed) to bytes.
 #[cfg(feature = "gpt")]
@@ -152,8 +152,8 @@ fn parse_mount(mut args: impl Iterator<Item = String>) -> io::Result<MountArgs> 
 fn do_mount(args: MountArgs) -> io::Result<()> {
     let root = decode_hex(&args.root_hex)?;
     let chain = Chain::from_gpt(&root)?;
-    let removed = chain.assemble()?;
-    let minor = removed.id().minor();
+    let device = chain.assemble()?;
+    let minor = DevId::try_from(device.metadata()?)?.minor();
     let dev_path = format!("/dev/dm-{minor}");
 
     let mut cmd = std::process::Command::new("mount");
@@ -170,9 +170,8 @@ fn do_mount(args: MountArgs) -> io::Result<()> {
         )));
     }
 
-    // Drop the Removed guard: the mount now anchors the dm stack.
-    // DM_DEFERRED_REMOVE is scheduled; the stack tears down on umount.
-    drop(removed);
+    // The mount now retains the already deferred-removal stack.
+    drop(device);
     Ok(())
 }
 

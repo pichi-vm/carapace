@@ -1,75 +1,164 @@
 # carapace
 
-**Carapace is OverlayFS for block devices.** Where OverlayFS composes filesystem layers in userspace, carapace composes cryptographically-bound block device layers underneath the filesystem. Each layer is a pair of content-addressable files; the composed stack presents as a unified, integrity-protected, read-only block device validated by a single trust anchor.
+Carapace composes cryptographically linked block-device layers into one
+integrity-protected, read-only device. Each layer (a **scute**) contains a
+persistent dm-snapshot exception store and a dm-verity hash volume. The top
+layer's independently trusted root binds the entire chain.
 
-This crate is the read-only consumer. The on-disk and chain composition format is specified normatively in [SPEC.md](SPEC.md); producer paths live elsewhere.
+This crate is the Linux read-side consumer. The format is specified in
+[SPEC.md](SPEC.md); image production lives elsewhere.
 
 ## Library API
 
-```rust
-use carapace::{Chain, FromGpt};
+Discovery returns a `Chain`: an owned root and a list of `Layer { data, hash }`
+paths, ordered base to top. Callers that already know the paths can construct
+that description directly. Assembly validates it and returns an open block
+device file. Both `Chain` and `Layer` implement `Debug` and `Clone`.
 
-// Walk the PARTUUID chain and build the dm-verity + dm-snapshot stack.
-let root: Vec<u8> = hex::decode(root_hex)?;
-let chain = Chain::from_gpt(&root)?;   // feature `gpt`, default on
-let removed = chain.assemble()?;       // returns the top device guard
+```rust,no_run
+use carapace::{Assemble, Chain, DevId, FromGpt};
 
-// Mount the top device read-only.
-let dev = format!("/dev/dm-{}", removed.id().minor());
-// … run mount(8) on `dev` …
-
-// Drop the guard after mounting — the mount anchors the dm stack.
-// DM_DEFERRED_REMOVE is scheduled; `umount` cascades teardown.
-drop(removed);
+fn mount(root: &[u8], directory: &std::path::Path) -> std::io::Result<()> {
+    let chain = Chain::from_gpt(root)?;
+    let device: std::fs::File = chain.assemble()?;
+    let id = DevId::try_from(device.metadata()?)?;
+    let status = std::process::Command::new("mount")
+        .args(["-o", "ro"])
+        .arg(format!("/dev/dm-{}", id.minor()))
+        .arg(directory)
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other("mount failed"));
+    }
+    // The mount now retains the stack; closing this file is safe.
+    drop(device);
+    Ok(())
+}
 ```
 
-Errors are `std::io::Error`. Validation failures (bad algorithm, wrong block
-size, broken salt chain) produce `ErrorKind::InvalidData`; operator misuse
-(e.g. a trusted root that is too short) produces `ErrorKind::InvalidInput`.
+Assembly returns a read-only `std::fs::File` at offset zero, with deferred
+removal already scheduled. The file, its clones, mounts, and upper block-device
+mappings can retain the device. Closing the last holder permits the kernel to
+tear down the stack. Dropping a file does not forcibly unmount anything.
+
+The file supports ordinary reads, seeks, metadata, and FD-based consumers.
+`DevId::try_from(device.metadata()?)` obtains its device number without closing
+it. `Removed` is no longer exported, and `assemble` is now a trait method:
+synchronous callers import `Assemble`.
+
+## Async API
+
+Enable `tokio` and import the async traits in place of the synchronous ones:
+
+```rust,no_run
+use carapace::{AsyncAssemble, AsyncFromGpt, Chain, DevId};
+
+async fn attach(root: &[u8]) -> std::io::Result<tokio::fs::File> {
+    let chain = Chain::from_gpt(root).await?;
+    let device = chain.assemble().await?;
+    let id = DevId::try_from(device.metadata().await?)?;
+    println!("assembled /dev/dm-{}", id.minor());
+    Ok(device)
+}
+```
+
+Both traits use the same synchronous implementation through Tokio's blocking
+pool. The async result is a `tokio::fs::File` owning the same open device, with
+no reopen. Discovery still returns `Chain`. Importing both sync and async
+traits requires explicit selection, such as `Assemble::assemble(&chain)` or
+`AsyncAssemble::assemble(&chain).await`.
+
+A Tokio runtime is required. Work starts when the future is polled. Once a
+blocking worker starts, dropping the future does not interrupt it: the worker
+finishes, and its unclaimed result closes. Runtime shutdown can wait for that
+worker. Assembly clones the path/root description into the worker; discovery
+copies its root. IO errors retain their kind, while runtime and worker failures
+are reported as contextual `std::io::Error`s.
+
+## Writable snapshots
+
+An assembled file can be the read-only origin of a writable snapshot, using
+`devmap-linux` directly. Writes go to a separate writable COW block device.
+For example, given an assembled `origin`, prepared `cow` block-device file,
+and a sector count no larger than the origin:
+
+```rust,no_run
+use devmap_linux::{Control, DevId};
+use devmap_linux::target::snapshot::{ChunkSize, Persistence, SnapshotTarget};
+use std::{fs::{File, OpenOptions}, io, num::NonZero};
+
+fn snapshot(origin: &File, cow: &File, name: &str, sectors: u64) -> io::Result<File> {
+    let target = SnapshotTarget::new(
+        DevId::try_from(origin.metadata()?)?,
+        DevId::try_from(cow.metadata()?)?,
+        Persistence::Persistent,
+        ChunkSize::new(NonZero::new(8).unwrap()).unwrap(),
+    );
+    let control = Control::open()?;
+    let device = control.create(name)?.guard();
+    device.builder().add(0, sectors, target)?.load()?;
+    device.resume()?;
+    device.defer(OpenOptions::new().read(true).write(true))
+}
+```
+
+Keep the input files alive through setup. The returned writable file retains
+the snapshot, which in turn retains the origin and COW device. A regular-file
+COW needs loop attachment first; lodown provides that separately.
+
+## Features and dependencies
+
+| Feature | Default | Purpose |
+|---|---|---|
+| `gpt` | On | `FromGpt` discovery through kernel-visible PARTUUIDs; CLI mounting |
+| `loop` | Off | Read-only, autoclearing loop attachment of regular-file layers |
+| `tokio` | Off | `AsyncAssemble` and, with `gpt`, `AsyncFromGpt` |
+
+The default build needs no async runtime. The library is empty on non-Linux
+targets. Rust 1.89 or newer is required. `devmap-linux` handles device control,
+`devmap-verity` handles the standard header/target format, and optional lodown
+handles loop attachment. Carapace itself forbids unsafe Rust.
+
+Validation failures use `InvalidData`; invalid caller inputs use `InvalidInput`.
+Regular-file layers without `loop` return `Unsupported`. The shared verity
+header decoder rejects noncanonical nonzero padding, which older Carapace
+versions accepted. Carapace additionally enforces its own parameter whitelist
+and chain rules, including for directly constructed chains.
+
+Assemblers coordinate publication with an advisory lock on
+`/dev/mapper/control`. Mappings are reused only when their active, read-only
+tables match. Names include root prefixes and backing device IDs; independent
+loop attachments of identical files may create separate mappings. Existing
+active tables are never reloaded during reuse.
 
 ## CLI
 
 ```sh
-# Assemble a chain and mount it at <dir> (requires CAP_SYS_ADMIN).
 carapace mount <root-hex> <dir> [--type <fs>]
-
-# Teardown is a plain unmount — deferred-remove cascades the dm stack.
 umount <dir>
 ```
 
-`<root-hex>` is the trusted chain root, hex-encoded (≥ 64 hex chars for
-sha256). `from_gpt` discovers partitions by walking `/sys/class/block/*/uevent`
-for `PARTUUID=` entries — no GPT parser in userspace. For loop-mounted images,
-run `losetup --partscan IMAGE` first; the kernel populates sysfs synchronously.
+The trusted root must match the chain's digest size: 32 bytes for SHA-256 or
+64 bytes for SHA-512. For GPT discovery, expose the outer image's partitions
+first with `losetup --partscan`. Discovery reads `/sys/class/block/*/uevent`;
+it does not require udev. Mounting requires device-mapper privileges and
+`mount(8)`.
 
-## Building
-
-```sh
-cargo build --release   # produces target/release/carapace
-```
-
-The toolchain is pinned via `rust-toolchain.toml`. All dependencies are
-resolved via `Cargo.lock`; reproducible builds are a goal.
-
-## Testing
+## Building and testing
 
 ```sh
-cargo test --bins                                # unit tests (~1 s)
-sudo cargo test --tests -- --test-threads=1     # integration (~45 s, root-required)
+cargo build --release
+cargo test --lib --bins
+cargo test --no-default-features --lib --bins
+cargo test --all-features --lib --bins
+sudo cargo test --all-features --tests -- --test-threads=1
 ```
 
-Integration tests build a real layered ext4 carapace via
-`tests/fixtures/build_carapace.sh` (a shell + python pipeline using `sgdisk` +
-`veritysetup` + `dmsetup`), then assemble, mount, and verify per-scute file
-content.
-
-## Runtime requirements
-
-- Linux kernel ≥ 5.8 (`LOOP_CONFIGURE`, dm-verity, dm-snapshot)
-- `devtmpfs` (universal on modern distros)
-- For test/dev: `cryptsetup-bin`, `gdisk`, `dmsetup`, `e2fsprogs`, `python3`
-
-`udev` is NOT required at runtime — partition discovery is sysfs-driven.
+Kernel integration tests require loop devices, dm-zero, dm-verity,
+dm-snapshot, mount privileges, `cryptsetup-bin`, `gdisk`, `dmsetup`,
+`e2fsprogs`, and `python3`. Run them on an isolated test host: fixture cleanup
+uses the `CARAPACE-*` device namespace. They verify composition, tampering,
+file lifetimes, shared mappings, async cleanup, and writable snapshots.
 
 ## License
 

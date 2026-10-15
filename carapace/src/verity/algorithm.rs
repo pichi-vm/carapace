@@ -17,6 +17,7 @@ pub(crate) enum Algorithm {
 }
 
 impl Algorithm {
+    #[cfg(feature = "gpt")]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Sha256 => "sha256",
