@@ -78,27 +78,43 @@ traits are imported, select `<Chain as AsyncFromGpt>::from_gpt(root)` explicitly
 ## Writable snapshots
 
 An assembled file can be the read-only origin of a writable snapshot, using
-`devmap-linux` directly. Writes go to a separate writable COW block device.
-For example, given an assembled `origin`, prepared `cow` block-device file,
-and a sector count no larger than the origin:
+`devmap-linux` and `devmap-snapshot` directly. Writes go to a separate writable
+COW block device. For example, given an assembled `origin`, prepared `cow`
+block-device file, and a sector count no larger than the origin:
 
 ```rust,no_run
-use devmap_linux::{Control, DevId};
-use devmap_linux::target::snapshot::{ChunkSize, Persistence, SnapshotTarget};
-use std::{fs::{File, OpenOptions}, io, num::NonZero};
+use devmap_core::{BlockSize, Span};
+use devmap_linux::targets::Target;
+use devmap_linux::{Control, DevId, Table};
+use devmap_snapshot::{
+    Discard, Parameters, Persistence, Persistent, Snapshot,
+};
+use std::{
+    fs::{File, OpenOptions},
+    io,
+};
 
 fn snapshot(origin: &File, cow: &File, name: &str, sectors: u64) -> io::Result<File> {
-    let target = SnapshotTarget::new(
-        DevId::try_from(origin.metadata()?)?,
-        DevId::try_from(cow.metadata()?)?,
-        Persistence::Persistent,
-        ChunkSize::new(NonZero::new(8).unwrap()).unwrap(),
-    );
+    let target = Snapshot::from(Parameters {
+        origin: DevId::try_from(origin.metadata()?)?,
+        cow: DevId::try_from(cow.metadata()?)?,
+        persistence: Persistence::Persistent(Persistent::Standard),
+        chunk_size: BlockSize::default(), // 4 KiB / 8 sectors
+        discard: Discard::Disabled,
+    });
     let control = Control::open()?;
-    let device = control.create(name)?.guard();
-    device.builder().add(0, sectors, target)?.load()?;
-    device.resume()?;
-    device.defer(OpenOptions::new().read(true).write(true))
+    let id = control.create(name)?;
+    let version = control.version(Snapshot::NAME)?;
+    let table = Table::<4096>::default().add(Span::new(0, sectors), &target, version)?;
+    control.load(id, table, false)?;
+    control.suspend(id, false)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(format!("/dev/dm-{}", id.minor()))?;
+    // Schedule deferred removal; the open file keeps the mapping alive.
+    control.remove(id, true)?;
+    Ok(file)
 }
 ```
 
@@ -115,9 +131,10 @@ COW needs loop attachment first; lodown provides that separately.
 | `tokio` | Off | `AsyncFromGpt` (also requires `gpt`) |
 
 The default build needs no async runtime. The library is empty on non-Linux
-targets. Rust 1.89 or newer is required. `devmap-linux` handles device control,
-`devmap-verity` handles the standard header/target format, and optional lodown
-handles loop attachment. Carapace itself forbids unsafe Rust.
+targets. Rust 1.89 or newer is required. `devmap-linux` handles device control (and exports `DevId`),
+`devmap-core` shared geometry types (spans, block sizes), `devmap-snapshot` the
+snapshot target, `devmap-verity` the standard header/target format, and optional
+lodown loop attachment. Carapace itself forbids unsafe Rust.
 
 Validation failures use `InvalidData`; invalid caller inputs use `InvalidInput`.
 Regular-file layers without `loop` return `Unsupported`. The shared verity
@@ -158,7 +175,8 @@ Kernel integration tests require loop devices, dm-zero, dm-verity,
 dm-snapshot, mount privileges, `cryptsetup-bin`, `gdisk`, `dmsetup`,
 `e2fsprogs`, and `python3`. Run them on an isolated test host: fixture cleanup
 uses the `CARAPACE-*` device namespace. They verify composition, tampering,
-file lifetimes, shared mappings, async cleanup, and writable snapshots.
+file lifetimes, shared mappings, caller-managed async assembly, and writable
+snapshots.
 
 ## License
 

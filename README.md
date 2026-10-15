@@ -8,7 +8,8 @@ read-only block device, validated by one trust anchor: the top scute's verity
 root. See the [format specification](carapace/SPEC.md).
 
 The workspace contains the `carapace` library and CLI. It uses the external
-`devmap-linux`, `devmap-verity`, and optional `lodown` crates.
+`devmap-core`, `devmap-linux`, `devmap-snapshot`, `devmap-verity`, and
+optional `lodown` crates.
 
 ## Library API
 
