@@ -104,6 +104,16 @@ fn snapshot(origin: &File, cow: &File, name: &str, sectors: u64) -> io::Result<F
     });
     let control = Control::open()?;
     let id = control.create(name)?;
+    // Immediate-remove on failure until deferred removal is armed.
+    struct Cleanup<'a>(&'a Control, Option<DevId>);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            if let Some(id) = self.1.take() {
+                let _ = self.0.remove(id, false);
+            }
+        }
+    }
+    let mut cleanup = Cleanup(&control, Some(id));
     let version = control.version(Snapshot::NAME)?;
     let table = Table::<4096>::default().add(Span::new(0, sectors), &target, version)?;
     control.load(id, table, false)?;
@@ -114,6 +124,7 @@ fn snapshot(origin: &File, cow: &File, name: &str, sectors: u64) -> io::Result<F
         .open(format!("/dev/dm-{}", id.minor()))?;
     // Schedule deferred removal; the open file keeps the mapping alive.
     control.remove(id, true)?;
+    cleanup.1 = None;
     Ok(file)
 }
 ```

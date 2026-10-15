@@ -240,6 +240,7 @@ fn writable_snapshot_keeps_origin_immutable_and_alive() {
     });
     let control = devmap_linux::Control::open().unwrap();
     let id = control.create("CARAPACE-test-writable").unwrap();
+    let cleanup = common::MappingCleanup::new(&control, id);
     let version = control.version(Snapshot::NAME).unwrap();
     let table = Table::<4096>::default()
         .add(Span::new(0, 2048), &snapshot, version)
@@ -252,6 +253,7 @@ fn writable_snapshot_keeps_origin_immutable_and_alive() {
         .open(format!("/dev/dm-{}", id.minor()))
         .unwrap();
     control.remove(id, true).unwrap();
+    cleanup.disarm();
     drop(cow);
     let changed = original.map(|byte| byte ^ 0xff);
     writable.write_all_at(&changed, 4096).unwrap();
@@ -322,6 +324,7 @@ fn conflicting_mapping_is_rejected_without_reloading_or_removing_it() {
     let (_dir, _attached, chain) = fixture(1);
     let control = devmap_linux::Control::open().unwrap();
     let id = control.create("CARAPACE-z").unwrap();
+    let cleanup = common::MappingCleanup::new(&control, id);
     // An existing device with the expected name but the wrong extent.
     let version = control.version(Zero::NAME).unwrap();
     let table = Table::<4096>::default()
@@ -335,5 +338,6 @@ fn conflicting_mapping_is_rejected_without_reloading_or_removing_it() {
     let mut rows = control.table::<4096>(id).unwrap();
     assert_eq!(rows.next().unwrap().unwrap().span().length, 8);
     control.remove(id, false).unwrap();
+    cleanup.disarm();
     torn_down();
 }

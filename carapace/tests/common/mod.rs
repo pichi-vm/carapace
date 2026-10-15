@@ -18,7 +18,9 @@
 
 #![allow(dead_code)]
 
+use carapace::DevId;
 use carapace::{Assemble, Chain, FromGpt};
+use devmap_linux::Control;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -309,5 +311,38 @@ pub(crate) fn cleanup_dm() {
         let _ = Command::new("dmsetup")
             .args(["remove", "-f", &name])
             .output();
+    }
+}
+
+/// Immediate-remove guard for a device-mapper mapping created in a test.
+///
+/// Install right after `Control::create`. Drop removes the device immediately
+/// so a panic mid-setup cannot leave `CARAPACE-*` mappings behind. Call
+/// [`disarm`](Self::disarm) only after deferred removal is scheduled behind an
+/// open file, or after an explicit successful remove.
+pub(crate) struct MappingCleanup {
+    control: Control,
+    id: Option<DevId>,
+}
+
+impl MappingCleanup {
+    pub(crate) fn new(control: &Control, id: DevId) -> Self {
+        Self {
+            control: control.clone(),
+            id: Some(id),
+        }
+    }
+
+    /// Forget the device without removing it (caller already removed it).
+    pub(crate) fn disarm(mut self) {
+        self.id = None;
+    }
+}
+
+impl Drop for MappingCleanup {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let _ = self.control.remove(id, false);
+        }
     }
 }
