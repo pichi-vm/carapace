@@ -4,7 +4,7 @@
 //! Shared verity header decoding followed by Carapace's stricter profile.
 
 use crate::verity::algorithm::{self, Algorithm};
-use devmap_verity::header::{HashType, Header};
+use devmap_verity::{HashType, Header};
 use std::io;
 
 pub(crate) const VERITY_SUPERBLOCK_SIZE: usize = 512;
@@ -31,25 +31,34 @@ impl ValidatedVeritySuperblock {
             .ok_or_else(|| invalid("short verity superblock".into()))?;
         let header = Header::decode(record.try_into().unwrap())
             .map_err(|error| invalid(error.to_string()))?;
-        let algorithm = algorithm::parse(header.algorithm.as_ref())
+        let algorithm = algorithm::parse(header.parameters.algorithm.as_ref())
             .map_err(|error| invalid(error.to_string()))?;
-        if header.hash_type != HashType::Normal {
+        if header.parameters.hash_type != HashType::Normal {
             return Err(invalid("hash_type must be 1".into()));
         }
-        if header.data.size.bytes().get() != 4096 || header.hash.bytes().get() != 4096 {
+        if header.parameters.data.size.bytes().get() != 4096
+            || header.parameters.hash.bytes().get() != 4096
+        {
             return Err(invalid("data and hash block sizes must be 4096".into()));
         }
-        if header.salt.len() < algorithm.digest_size() {
+        if header.parameters.salt.len() < algorithm.digest_size() {
             return Err(invalid("salt is shorter than the algorithm digest".into()));
         }
-        if header.data.count.get().checked_mul(4096).is_none() {
+        if header
+            .parameters
+            .data
+            .count
+            .get()
+            .checked_mul(4096)
+            .is_none()
+        {
             return Err(invalid("data_blocks * 4096 overflows u64".into()));
         }
         Ok(Self { algorithm, header })
     }
 
     pub(crate) fn full_salt(&self) -> &[u8] {
-        &self.header.salt
+        &self.header.parameters.salt
     }
 
     pub(crate) fn is_base(&self) -> bool {

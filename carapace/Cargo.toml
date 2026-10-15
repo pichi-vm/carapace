@@ -30,9 +30,14 @@ tokio = ["dep:tokio"]
 # resolves it to an empty crate instead of compiling the Linux-only ioctl
 # stack. Matches the corium/conglobate pattern.
 [target.'cfg(target_os = "linux")'.dependencies]
-# Device control and the shared verity format. No userspace hashing required.
-devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "7d5bba500410ef30edc7a7da327d04093913a09b" }
-devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "7d5bba500410ef30edc7a7da327d04093913a09b" }
+# Device control, snapshot/zero targets, and the shared verity format.
+# No userspace hashing required. Pinned to current devmap main (post
+# c5fc512 API refactor): control is DevId-based, targets live in
+# dedicated crates, and tables are built with Table::add.
+devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
 # Safe loop-device wrapper for file-backed layers (feature `loop`).
 lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }

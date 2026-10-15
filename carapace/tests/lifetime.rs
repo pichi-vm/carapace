@@ -8,6 +8,7 @@ mod common;
 
 use carapace::{Assemble, Chain, DevId, FromGpt};
 use common::{build_chain, carapace_devices_present, decode_hex, with_mounted, AttachedImage};
+use devmap_linux::records::Records;
 use serial_test::serial;
 use std::fs::{File, OpenOptions};
 use std::io::Seek;
@@ -96,11 +97,18 @@ fn overlapping_chains_share_lower_mappings() {
     let control = devmap_linux::Control::open().unwrap();
     let upper_id = DevId::try_from(upper.metadata().unwrap()).unwrap();
     let lower_id = DevId::try_from(lower.metadata().unwrap()).unwrap();
-    assert!(control
-        .by_device(upper_id)
-        .deps()
-        .unwrap()
-        .contains(&lower_id));
+    let mut deps = control.deps::<4096>(upper_id).unwrap();
+    let mut found = false;
+    while let Some(dep) = deps.next() {
+        if dep.unwrap() == lower_id {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "upper mapping must depend on the shared lower device"
+    );
     drop(lower);
     with_mounted(&node(&upper), |mount| {
         assert!(mount.join("scute1.txt").exists());
@@ -195,8 +203,12 @@ fn file_backed_layers_autoclear_on_last_close() {
 #[test]
 #[serial]
 fn writable_snapshot_keeps_origin_immutable_and_alive() {
-    use devmap_linux::target::snapshot::{ChunkSize, Persistence, SnapshotTarget};
-    use std::num::NonZero;
+    use devmap_core::{BlockSize, Span};
+    use devmap_linux::targets::Target;
+    use devmap_linux::Table;
+    use devmap_snapshot::{
+        Discard, Parameters as SnapshotParameters, Persistence, Persistent, Snapshot,
+    };
 
     if !available() {
         return;
@@ -219,24 +231,27 @@ fn writable_snapshot_keeps_origin_immutable_and_alive() {
         .attach(&backing, 0, config)
         .unwrap();
     let origin_id = DevId::try_from(origin.metadata().unwrap()).unwrap();
-    let target = SnapshotTarget::new(
-        origin_id,
-        DevId::try_from(cow.as_ref().metadata().unwrap()).unwrap(),
-        Persistence::Persistent,
-        ChunkSize::new(NonZero::new(8).unwrap()).unwrap(),
-    );
+    let snapshot = Snapshot::from(SnapshotParameters {
+        origin: origin_id,
+        cow: DevId::try_from(cow.as_ref().metadata().unwrap()).unwrap(),
+        persistence: Persistence::Persistent(Persistent::Standard),
+        chunk_size: BlockSize::default(),
+        discard: Discard::Disabled,
+    });
     let control = devmap_linux::Control::open().unwrap();
-    let mapping = control.create("CARAPACE-test-writable").unwrap().guard();
-    mapping
-        .builder()
-        .add(0, 2048, target)
-        .unwrap()
-        .load()
+    let id = control.create("CARAPACE-test-writable").unwrap();
+    let version = control.version(Snapshot::NAME).unwrap();
+    let table = Table::<4096>::default()
+        .add(Span::new(0, 2048), &snapshot, version)
         .unwrap();
-    mapping.resume().unwrap();
-    let writable = mapping
-        .defer(OpenOptions::new().read(true).write(true))
+    control.load(id, table, false).unwrap();
+    control.suspend(id, false).unwrap();
+    let writable = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(format!("/dev/dm-{}", id.minor()))
         .unwrap();
+    control.remove(id, true).unwrap();
     drop(cow);
     let changed = original.map(|byte| byte ^ 0xff);
     writable.write_all_at(&changed, 4096).unwrap();
@@ -247,7 +262,7 @@ fn writable_snapshot_keeps_origin_immutable_and_alive() {
     origin.read_exact_at(&mut actual, 4096).unwrap();
     assert_eq!(actual, original);
     drop(origin);
-    let retained_origin = File::open(control.by_device(origin_id).node_path()).unwrap();
+    let retained_origin = File::open(format!("/dev/dm-{}", origin_id.minor())).unwrap();
     retained_origin.read_exact_at(&mut actual, 4096).unwrap();
     assert_eq!(actual, original);
     drop(retained_origin);
@@ -297,26 +312,28 @@ fn async_discovery_and_caller_managed_assembly() {
 #[test]
 #[serial]
 fn conflicting_mapping_is_rejected_without_reloading_or_removing_it() {
-    use devmap_linux::target::zero::ZeroTarget;
+    use devmap_core::Span;
+    use devmap_linux::records::Records;
+    use devmap_linux::targets::{Target, Zero};
+    use devmap_linux::Table;
     if !available() {
         return;
     }
     let (_dir, _attached, chain) = fixture(1);
     let control = devmap_linux::Control::open().unwrap();
-    let mapping = control.create("CARAPACE-z").unwrap().guard();
+    let id = control.create("CARAPACE-z").unwrap();
     // An existing device with the expected name but the wrong extent.
-    mapping
-        .builder()
-        .read_only()
-        .add(0, 8, ZeroTarget)
-        .unwrap()
-        .load()
+    let version = control.version(Zero::NAME).unwrap();
+    let table = Table::<4096>::default()
+        .add(Span::new(0, 8), &Zero, version)
         .unwrap();
-    mapping.resume().unwrap();
+    control.load(id, table, true).unwrap();
+    control.suspend(id, false).unwrap();
     let error = chain.assemble().unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("different table"));
-    assert_eq!(mapping.table().unwrap().next().unwrap().length(), 8);
-    drop(mapping);
+    let mut rows = control.table::<4096>(id).unwrap();
+    assert_eq!(rows.next().unwrap().unwrap().span().length, 8);
+    control.remove(id, false).unwrap();
     torn_down();
 }

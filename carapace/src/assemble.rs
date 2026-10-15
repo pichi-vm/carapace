@@ -8,14 +8,15 @@ use crate::util::hex_lower;
 use crate::verity::superblock::VERITY_SUPERBLOCK_SIZE;
 use crate::verity::ValidatedVeritySuperblock;
 use crate::{Chain, Layer};
-use devmap_linux::device::Status;
-use devmap_linux::target::snapshot::{ChunkSize, Persistence, SnapshotTarget};
-use devmap_linux::target::zero::ZeroTarget;
-use devmap_linux::target::Target;
-use devmap_linux::{Control, DevId};
+use devmap_core::{BlockSize, Span};
+use devmap_linux::records::Records;
+use devmap_linux::targets::{Target, Zero};
+use devmap_linux::{Control, DevId, Status, Table};
+use devmap_snapshot::{
+    Discard, Parameters as SnapshotParameters, Persistence, Persistent, Snapshot,
+};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
-use std::num::NonZero;
 use std::os::unix::fs::FileTypeExt;
 
 /// Preserve the existing 64 GiB virtual origin size during the API migration.
@@ -92,7 +93,7 @@ impl Chain {
         let assembler = Assembler {
             control: Control::open()?,
         };
-        let mut origin = assembler.activate("CARAPACE-z", ZERO_COUNT_SECTORS, ZeroTarget)?;
+        let mut origin = assembler.activate("CARAPACE-z", ZERO_COUNT_SECTORS, Zero)?;
         for (index, layer) in prepared.iter().enumerate() {
             origin = assembler
                 .layer(layer, origin, index)
@@ -105,6 +106,52 @@ impl Chain {
 #[derive(Debug)]
 struct Assembler {
     control: Control,
+}
+
+/// Rolls a freshly created device back with an immediate remove on drop.
+///
+/// Mirrors the pre-refactor `Device::guard()` contract: stay armed through
+/// load/resume/open, then disarm only after deferred removal is scheduled
+/// behind an open file that pins the mapping.
+struct Rollback {
+    control: Control,
+    id: Option<DevId>,
+}
+
+impl Rollback {
+    fn new(control: &Control, id: DevId) -> Self {
+        Self {
+            control: control.clone(),
+            id: Some(id),
+        }
+    }
+
+    fn disarm(mut self) {
+        self.id = None;
+    }
+
+    fn fail(mut self, error: io::Error) -> io::Error {
+        let Some(id) = self.id.take() else {
+            return error;
+        };
+        // `take` disarms Drop so cleanup runs once here, and any cleanup
+        // error is composed into the returned value.
+        match self.control.remove(id, false) {
+            Ok(()) => error,
+            Err(cleanup) => io::Error::new(
+                error.kind(),
+                format!("{error}; immediate cleanup also failed: {cleanup}"),
+            ),
+        }
+    }
+}
+
+impl Drop for Rollback {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let _ = self.control.remove(id, false);
+        }
+    }
 }
 
 impl Assembler {
@@ -168,8 +215,13 @@ impl Assembler {
             "CARAPACE-s{}-{origin_id}-{verity_id}",
             hex_lower(&layer.root[16..32])
         );
-        let chunk = ChunkSize::new(NonZero::new(8).unwrap()).unwrap();
-        let snapshot = SnapshotTarget::new(origin_id, verity_id, Persistence::Persistent, chunk);
+        let snapshot = Snapshot::from(SnapshotParameters {
+            origin: origin_id,
+            cow: verity_id,
+            persistence: Persistence::Persistent(Persistent::Standard),
+            chunk_size: BlockSize::default(),
+            discard: Discard::Disabled,
+        });
         // The upper mapping holds origin/verity before their files close.
         self.activate(&name, ZERO_COUNT_SECTORS, snapshot)
     }
@@ -207,22 +259,33 @@ impl Assembler {
         lock.lock()?;
         for _ in 0..8 {
             match self.control.create(name) {
-                Ok(device) => {
-                    let guard = device.guard();
+                Ok(id) => {
+                    let rollback = Rollback::new(&self.control, id);
                     #[cfg(test)]
                     observe(ActivationStage::Created)?;
-                    guard
-                        .builder()
-                        .read_only()
-                        .add(0, sectors, target.clone())?
-                        .load()?;
-                    guard.resume()?;
+                    let version = self.control.version(T::NAME)?;
+                    let table =
+                        Table::<4096>::default().add(Span::new(0, sectors), &target, version)?;
+                    self.control.load(id, table, true)?;
+                    self.control.suspend(id, false)?;
                     #[cfg(test)]
                     observe(ActivationStage::Resumed)?;
                     // Keep exclusion until the file pins the mapping and the
                     // rollback guard is disarmed. On error, guard cleanup runs
                     // before the earlier-declared lock file closes.
-                    return guard.defer(OpenOptions::new().read(true));
+                    let file = match OpenOptions::new()
+                        .read(true)
+                        .open(format!("/dev/dm-{}", id.minor()))
+                    {
+                        Ok(file) => file,
+                        Err(error) => return Err(rollback.fail(error)),
+                    };
+                    if let Err(error) = self.control.remove(id, true) {
+                        drop(file);
+                        return Err(rollback.fail(error));
+                    }
+                    rollback.disarm();
+                    return Ok(file);
                 }
                 Err(error)
                     if matches!(
@@ -233,13 +296,13 @@ impl Assembler {
             }
             // Deferred removal can race lookup/open even under the setup lock:
             // existing consumers close their files without acquiring it.
-            let existing = self.control.by_name(name).and_then(|(device, _)| {
+            let existing = self.control.by_name(name).and_then(|(id, _)| {
                 #[cfg(test)]
                 observe(ActivationStage::LookedUp)?;
-                let file = File::open(device.node_path())?;
-                Ok((device, file))
+                let file = File::open(format!("/dev/dm-{}", id.minor()))?;
+                Ok((id, file))
             });
-            let (device, file) = match existing {
+            let (id, file) = match existing {
                 Ok(existing) => existing,
                 Err(error) if matches!(error.raw_os_error(), Some(2 | 6 | 19)) => continue,
                 Err(error) => return Err(error),
@@ -249,21 +312,23 @@ impl Assembler {
             drop(lock);
             #[cfg(test)]
             observe(ActivationStage::Pinned)?;
-            let status = device.status()?;
+            let status = self.control.status(id)?;
             let required = Status::READ_ONLY | Status::ACTIVE_TABLE;
             if status.flags & required != required
                 || status.flags & (Status::SUSPENDED | Status::INACTIVE_TABLE) != 0
-                || DevId::try_from(file.metadata()?)? != device.id()
+                || DevId::try_from(file.metadata()?)? != id
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("existing mapping {name} is not an active read-only device"),
                 ));
             }
-            let mut rows = device.table()?;
+            let version = self.control.version(T::NAME)?;
+            let mut rows = self.control.table::<4096>(id)?;
             let matches = match rows.next() {
                 Some(row) => {
-                    row.start() == 0 && row.length() == sectors && row.parse::<T>()? == target
+                    let row = row?;
+                    row.span() == Span::new(0, sectors) && row.parse::<T>(version)? == target
                 }
                 None => false,
             };
@@ -274,7 +339,7 @@ impl Assembler {
                 ));
             }
             drop(rows);
-            device.remove(true)?;
+            self.control.remove(id, true)?;
             return Ok(file);
         }
         Err(io::Error::new(
@@ -329,7 +394,7 @@ mod tests {
         let name = format!("CARAPACE-lock-rollback-{}", std::process::id());
         let mut stages = Vec::new();
         let error = assembler
-            .activate_inner(&name, 8, ZeroTarget, &mut |stage| {
+            .activate_inner(&name, 8, Zero, &mut |stage| {
                 stages.push(stage);
                 assert!(!publication_lock_available());
                 if stage == ActivationStage::Resumed {
@@ -343,7 +408,7 @@ mod tests {
         assert!(publication_lock_available());
         assert!(assembler.control.by_name(&name).is_err());
         // The same name can be published successfully after rollback.
-        drop(assembler.activate(&name, 8, ZeroTarget).unwrap());
+        drop(assembler.activate(&name, 8, Zero).unwrap());
     }
 
     #[test]
@@ -353,11 +418,11 @@ mod tests {
             return;
         };
         let name = format!("CARAPACE-lock-reuse-{}", std::process::id());
-        let mut first = Some(assembler.activate(&name, 8, ZeroTarget).unwrap());
+        let mut first = Some(assembler.activate(&name, 8, Zero).unwrap());
         let id = DevId::try_from(first.as_ref().unwrap().metadata().unwrap()).unwrap();
         let mut stages = Vec::new();
         let second = assembler
-            .activate_inner(&name, 8, ZeroTarget, &mut |stage| {
+            .activate_inner(&name, 8, Zero, &mut |stage| {
                 stages.push(stage);
                 assert_eq!(
                     publication_lock_available(),
@@ -367,7 +432,7 @@ mod tests {
                     // Only the reuser's file now holds the deferred mapping.
                     // Subsequent status/table validation must still succeed.
                     drop(first.take());
-                    assert_eq!(assembler.control.by_name(&name)?.0.id(), id);
+                    assert_eq!(assembler.control.by_name(&name)?.0, id);
                 }
                 Ok(())
             })
@@ -405,12 +470,12 @@ mod tests {
                         assert!(assembler.control.by_name(name).is_err());
                         None
                     } else {
-                        Some(assembler.activate(name, 8, ZeroTarget).unwrap())
+                        Some(assembler.activate(name, 8, Zero).unwrap())
                     };
                     done_tx.send(()).unwrap();
                     file
                 });
-                let result = assembler.activate_inner(name, 8, ZeroTarget, &mut |stage| {
+                let result = assembler.activate_inner(name, 8, Zero, &mut |stage| {
                     if stage == ActivationStage::Resumed {
                         start_tx.send(()).unwrap();
                         attempt_rx
@@ -452,10 +517,10 @@ mod tests {
             return;
         };
         let name = format!("CARAPACE-lock-disappear-{}", std::process::id());
-        let mut first = Some(assembler.activate(&name, 8, ZeroTarget).unwrap());
+        let mut first = Some(assembler.activate(&name, 8, Zero).unwrap());
         let mut stages = Vec::new();
         let replacement = assembler
-            .activate_inner(&name, 8, ZeroTarget, &mut |stage| {
+            .activate_inner(&name, 8, Zero, &mut |stage| {
                 stages.push(stage);
                 assert!(!publication_lock_available());
                 if stage == ActivationStage::LookedUp {
