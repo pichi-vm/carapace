@@ -48,32 +48,32 @@ synchronous callers import `Assemble`.
 
 ## Async API
 
-Enable `tokio` and import the async traits in place of the synchronous ones:
+With `gpt` and `tokio`, `AsyncFromGpt` provides discovery through Tokio's
+blocking pool. Assembly is synchronous; the caller chooses how to schedule it:
 
 ```rust,no_run
-use carapace::{AsyncAssemble, AsyncFromGpt, Chain, DevId};
+use carapace::{Assemble, AsyncFromGpt, Chain};
 
-async fn attach(root: &[u8]) -> std::io::Result<tokio::fs::File> {
+async fn attach(root: &[u8]) -> std::io::Result<std::fs::File> {
     let chain = Chain::from_gpt(root).await?;
-    let device = chain.assemble().await?;
-    let id = DevId::try_from(device.metadata().await?)?;
-    println!("assembled /dev/dm-{}", id.minor());
-    Ok(device)
+    tokio::task::spawn_blocking(move || chain.assemble())
+        .await
+        .map_err(std::io::Error::other)?
 }
 ```
 
-Both traits use the same synchronous implementation through Tokio's blocking
-pool. The async result is a `tokio::fs::File` owning the same open device, with
-no reopen. Discovery still returns `Chain`. Importing both sync and async
-traits requires explicit selection, such as `Assemble::assemble(&chain)` or
-`AsyncAssemble::assemble(&chain).await`.
+The closure owns the chain and returns the same device file without reopening
+it. Callers wanting Tokio file I/O can wrap it with `tokio::fs::File::from_std`
+using Tokio's `fs` feature. `AsyncAssemble` is no longer exported.
 
-A Tokio runtime is required. Work starts when the future is polled. Once a
-blocking worker starts, dropping the future does not interrupt it: the worker
-finishes, and its unclaimed result closes. Runtime shutdown can wait for that
-worker. Assembly clones the path/root description into the worker; discovery
-copies its root. IO errors retain their kind, while runtime and worker failures
-are reported as contextual `std::io::Error`s.
+Dropping a Tokio blocking task's join handle does not stop work that has
+started; runtime shutdown may wait for it to finish.
+
+Async discovery requires a Tokio runtime. Work starts when its future is
+polled and copies the root into the worker. Dropping the future does not
+interrupt a running worker. IO errors retain their kind, while runtime and
+worker failures are reported as contextual `std::io::Error`s. If both discovery
+traits are imported, select `<Chain as AsyncFromGpt>::from_gpt(root)` explicitly.
 
 ## Writable snapshots
 
@@ -112,7 +112,7 @@ COW needs loop attachment first; lodown provides that separately.
 |---|---|---|
 | `gpt` | On | `FromGpt` discovery through kernel-visible PARTUUIDs; CLI mounting |
 | `loop` | Off | Read-only, autoclearing loop attachment of regular-file layers |
-| `tokio` | Off | `AsyncAssemble` and, with `gpt`, `AsyncFromGpt` |
+| `tokio` | Off | `AsyncFromGpt` (also requires `gpt`) |
 
 The default build needs no async runtime. The library is empty on non-Linux
 targets. Rust 1.89 or newer is required. `devmap-linux` handles device control,

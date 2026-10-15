@@ -22,7 +22,7 @@ gpt = []
 # File-backed layers: loop-attach `data`/`hash` files via lodown. corium is
 # block-only and can omit this.
 loop = ["dep:lodown"]
-# Async discovery and assembly adapters; the default build needs no runtime.
+# Async discovery adapter (with gpt); the default build needs no runtime.
 tokio = ["dep:tokio"]
 
 # carapace is Linux-only: the whole library and CLI drive device-mapper. Gate
@@ -35,7 +35,7 @@ devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "7d5bba50
 devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "7d5bba500410ef30edc7a7da327d04093913a09b" }
 # Safe loop-device wrapper for file-backed layers (feature `loop`).
 lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
-tokio = { version = "1", features = ["rt", "fs"], optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
 # zerocopy for snapshot header parsing.
 zerocopy = { workspace = true }
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! File ownership, shared mappings, async assembly, and writable derivation.
+//! File ownership, shared mappings, caller-managed async assembly, and writable derivation.
 #![cfg(all(target_os = "linux", feature = "gpt"))]
 
 mod common;
@@ -258,8 +258,8 @@ fn writable_snapshot_keeps_origin_immutable_and_alive() {
 #[cfg(feature = "tokio")]
 #[test]
 #[serial]
-fn async_discovery_and_assembly_return_a_tokio_device_file() {
-    use carapace::{AsyncAssemble, AsyncFromGpt};
+fn async_discovery_and_caller_managed_assembly() {
+    use carapace::AsyncFromGpt;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     if !available() {
         return;
@@ -277,7 +277,11 @@ fn async_discovery_and_assembly_return_a_tokio_device_file() {
             assert_eq!(actual.data, expected.data);
             assert_eq!(actual.hash, expected.hash);
         }
-        let mut file: tokio::fs::File = AsyncAssemble::assemble(&discovered).await.unwrap();
+        let file = tokio::task::spawn_blocking(move || discovered.assemble())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut file = tokio::fs::File::from_std(file);
         let id = DevId::try_from(file.metadata().await.unwrap()).unwrap();
         assert_eq!(file.stream_position().await.unwrap(), 0);
         let mut bytes = [0; 4096];
@@ -287,38 +291,6 @@ fn async_discovery_and_assembly_return_a_tokio_device_file() {
         });
         drop(file);
     });
-    torn_down();
-}
-
-#[cfg(feature = "tokio")]
-#[test]
-#[serial]
-fn abandoning_async_assembly_leaves_no_mapping() {
-    use std::future::Future;
-    use std::task::Poll;
-    if !available() {
-        return;
-    }
-    let (_dir, _attached, chain) = fixture(1);
-    let lock = File::open("/dev/mapper/control").unwrap();
-    lock.lock().unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let mut future = Box::pin(carapace::AsyncAssemble::assemble(&chain));
-        std::future::poll_fn(|cx| {
-            assert!(future.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        // The worker cannot publish a device while we hold the lock.
-        drop(future);
-    });
-    drop(lock);
-    // Shutdown waits for the detached blocking worker to finish and drop its
-    // unclaimed file; it does not cancel that worker.
-    drop(runtime);
     torn_down();
 }
 

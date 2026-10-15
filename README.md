@@ -29,9 +29,9 @@ fn attach(root: &[u8]) -> std::io::Result<std::fs::File> {
 with deferred removal already scheduled. The file, clones, mounts, and upper
 mappings retain the stack until their last holder closes.
 
-With feature `tokio`, import `AsyncFromGpt` and `AsyncAssemble` instead and
-await the same method names. Async assembly returns `tokio::fs::File`;
-discovery returns the same `Chain`. `gpt` is enabled by default; `loop`
+With features `gpt` and `tokio`, `AsyncFromGpt` provides async discovery.
+Assembly is synchronous; async callers can run it with `spawn_blocking`.
+`gpt` is enabled by default; `loop`
 (file-backed layers) and `tokio` are optional.
 
 See the [crate documentation](carapace/README.md) for the full API, async

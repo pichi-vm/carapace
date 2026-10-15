@@ -18,7 +18,6 @@
 //! - [`Layer`] — a data/hash path pair for one scute.
 //! - [`Assemble::assemble`] — build the dm stack and return a [`std::fs::File`].
 //! - `FromGpt` — discover a `Chain` by PARTUUID walk (feature `gpt`).
-//! - `AsyncAssemble` — Tokio assembly returning `tokio::fs::File` (feature `tokio`).
 //! - `AsyncFromGpt` — Tokio discovery (features `gpt` + `tokio`).
 //!
 //! Re-export: [`DevId`].
@@ -62,8 +61,8 @@ pub struct Chain {
 
 /// Assemble a chain into a read-only block device.
 ///
-/// Import this trait for synchronous `.assemble()`. If both assembly traits
-/// are in scope, use `Assemble::assemble(&chain)` to select this operation.
+/// Import this trait for `.assemble()`. This operation blocks; async callers
+/// should run it on their runtime's blocking pool.
 pub trait Assemble {
     /// Returns an open device file at offset zero. Deferred removal is already
     /// scheduled: the device remains alive while this file, a clone, a mount,
@@ -75,32 +74,6 @@ pub trait Assemble {
 impl Assemble for Chain {
     fn assemble(&self) -> io::Result<std::fs::File> {
         self.assemble_sync()
-    }
-}
-
-/// Asynchronous assembly using Tokio's blocking pool.
-///
-/// The returned file has the same device-lifetime contract as [`Assemble`].
-/// Requires a Tokio runtime. Work starts on first poll; once started, dropping
-/// the future does not interrupt kernel operations. The worker finishes and
-/// an unclaimed result is closed, permitting teardown. Runtime shutdown can
-/// wait for a running worker. This operation copies the chain description so
-/// the worker never borrows caller-owned data.
-#[cfg(feature = "tokio")]
-pub trait AsyncAssemble {
-    /// Assemble without blocking the executor, returning a Tokio device file.
-    fn assemble(
-        &self,
-    ) -> impl std::future::Future<Output = io::Result<tokio::fs::File>> + Send + '_;
-}
-
-#[cfg(feature = "tokio")]
-impl AsyncAssemble for Chain {
-    async fn assemble(&self) -> io::Result<tokio::fs::File> {
-        let chain = self.clone();
-        blocking(move || chain.assemble_sync())
-            .await
-            .map(tokio::fs::File::from_std)
     }
 }
 
@@ -149,8 +122,8 @@ impl AsyncFromGpt for Chain {
     }
 }
 
-// Shared execution boundary for discovery and assembly, preserving io errors.
-#[cfg(feature = "tokio")]
+// Execution boundary for discovery, preserving io errors.
+#[cfg(all(feature = "gpt", feature = "tokio"))]
 async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
@@ -162,7 +135,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| io::Error::other(format!("carapace worker failed: {error}")))?
 }
 
-#[cfg(all(test, feature = "tokio"))]
+#[cfg(all(test, feature = "gpt", feature = "tokio"))]
 mod async_tests {
     use super::*;
     use std::future::Future;
@@ -174,22 +147,6 @@ mod async_tests {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-    }
-
-    #[test]
-    fn assembly_future_is_send_and_returns_tokio_file() {
-        fn check(_: impl Future<Output = io::Result<tokio::fs::File>> + Send) {}
-        let chain = Chain {
-            root: vec![0; 32].into(),
-            layers: vec![],
-        };
-        check(AsyncAssemble::assemble(&chain));
-        let sync = Assemble::assemble(&chain).unwrap_err();
-        let asynchronous = runtime()
-            .block_on(AsyncAssemble::assemble(&chain))
-            .unwrap_err();
-        assert_eq!(sync.kind(), asynchronous.kind());
-        assert_eq!(sync.to_string(), asynchronous.to_string());
     }
 
     #[test]
