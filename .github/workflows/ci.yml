@@ -82,3 +82,7 @@ jobs:
             "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
             "RUSTFLAGS=-D warnings" \
             cargo test --all-features --tests -- --test-threads=1
+      - name: Block-device benchmark smoke test (root)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n
+        run: cargo bench --target x86_64-unknown-linux-gnu --bench block_device -- --test

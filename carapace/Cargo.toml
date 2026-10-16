@@ -45,6 +45,16 @@ tokio = { version = "1", features = ["rt"], optional = true }
 zerocopy = { workspace = true }
 
 [dev-dependencies]
+criterion = "0.5.1"
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72", features = ["sha2"] }
+gpt = "4"
+lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9" }
 serial_test = { version = "3", default-features = false }
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["rt", "fs", "io-util"] }
+uuid = "1"
+
+[[bench]]
+name = "block_device"
+harness = false
+required-features = ["gpt"]
