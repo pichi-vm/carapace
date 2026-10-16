@@ -33,6 +33,14 @@ fn fixture(layers: usize) -> (tempfile::TempDir, AttachedImage, Chain) {
     (dir, attached, chain)
 }
 
+// Explicit duplication is test setup, not an infallible public Clone contract.
+fn clone_layer(layer: &carapace::Layer) -> carapace::Layer {
+    carapace::Layer {
+        data: layer.data.try_clone().unwrap(),
+        hash: layer.hash.try_clone().unwrap(),
+    }
+}
+
 fn node(file: &File) -> PathBuf {
     let id = DevId::try_from(file.metadata().unwrap()).unwrap();
     PathBuf::from(format!("/dev/dm-{}", id.minor()))
@@ -84,13 +92,13 @@ fn overlapping_chains_share_lower_mappings() {
     }
     let (_dir, _attached, chain) = fixture(2);
     let mut parent_root = [0; 32];
-    File::open(&chain.layers[1].hash)
-        .unwrap()
+    chain.layers[1]
+        .hash
         .read_exact_at(&mut parent_root, 88)
         .unwrap();
     let parent = Chain {
         root: parent_root.into(),
-        layers: chain.layers[..1].to_vec(),
+        layers: chain.layers[..1].iter().map(clone_layer).collect(),
     };
     let lower = parent.assemble().unwrap();
     let upper = chain.assemble().unwrap();
@@ -123,7 +131,11 @@ fn concurrent_assembly_publishes_one_stack() {
     if !available() {
         return;
     }
-    let (_dir, _attached, chain) = fixture(2);
+    let (_dir, _attached, mut chain) = fixture(2);
+    for layer in &mut chain.layers {
+        layer.data.seek(std::io::SeekFrom::Start(19)).unwrap();
+        layer.hash.seek(std::io::SeekFrom::Start(37)).unwrap();
+    }
     let files = std::thread::scope(|scope| {
         let jobs: Vec<_> = (0..4)
             .map(|_| scope.spawn(|| chain.assemble().unwrap()))
@@ -134,6 +146,10 @@ fn concurrent_assembly_publishes_one_stack() {
     });
     for file in &files {
         assert_eq!(node(file), node(&files[0]));
+    }
+    for layer in &mut chain.layers {
+        assert_eq!(layer.data.stream_position().unwrap(), 19);
+        assert_eq!(layer.hash.stream_position().unwrap(), 37);
     }
     drop(files);
     torn_down();
@@ -148,7 +164,10 @@ fn failure_after_creating_a_lower_layer_cleans_up() {
     let (_dir, _attached, chain) = fixture(2);
     // Change only the trusted top root; direct construction bypasses GPT
     // lookup, so lower mappings are created before the verified read fails.
-    let mut wrong = chain.clone();
+    let mut wrong = Chain {
+        root: chain.root.clone(),
+        layers: chain.layers.iter().map(clone_layer).collect(),
+    };
     wrong.root[0] ^= 1;
     assert!(wrong.assemble().is_err());
     torn_down();
@@ -173,18 +192,18 @@ fn file_backed_layers_autoclear_on_last_close() {
     let data = dir.path().join("data");
     let hash = dir.path().join("hash");
     std::io::copy(
-        &mut File::open(&chain.layers[0].data).unwrap(),
+        &mut &chain.layers[0].data,
         &mut File::create(&data).unwrap(),
     )
     .unwrap();
     std::io::copy(
-        &mut File::open(&chain.layers[0].hash).unwrap(),
+        &mut &chain.layers[0].hash,
         &mut File::create(&hash).unwrap(),
     )
     .unwrap();
     chain.layers[0] = carapace::Layer {
-        data: data.clone(),
-        hash: hash.clone(),
+        data: File::open(&data).unwrap(),
+        hash: File::open(&hash).unwrap(),
     };
     drop(attached);
     let first = chain.assemble().unwrap();
@@ -291,8 +310,14 @@ fn async_discovery_and_caller_managed_assembly() {
             .unwrap();
         assert_eq!(discovered.root, chain.root);
         for (actual, expected) in discovered.layers.iter().zip(&chain.layers) {
-            assert_eq!(actual.data, expected.data);
-            assert_eq!(actual.hash, expected.hash);
+            assert_eq!(
+                DevId::try_from(actual.data.metadata().unwrap()).unwrap(),
+                DevId::try_from(expected.data.metadata().unwrap()).unwrap()
+            );
+            assert_eq!(
+                DevId::try_from(actual.hash.metadata().unwrap()).unwrap(),
+                DevId::try_from(expected.hash.metadata().unwrap()).unwrap()
+            );
         }
         let file = tokio::task::spawn_blocking(move || discovered.assemble())
             .await

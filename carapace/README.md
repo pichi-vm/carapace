@@ -11,9 +11,17 @@ This crate is the Linux read-side consumer. The format is specified in
 ## Library API
 
 Discovery returns a `Chain`: an owned root and a list of `Layer { data, hash }`
-paths, ordered base to top. Callers that already know the paths can construct
-that description directly. Assembly validates it and returns an open block
-device file. Both `Chain` and `Layer` implement `Debug` and `Clone`.
+open files, ordered base to top. Callers can construct layers directly with
+`Layer { data: File::open(data_path)?, hash: File::open(hash_path)? }`.
+Discovery retains the files it inspected; assembly independently rereads and
+validates their headers with positional I/O, preserving all input offsets.
+
+`Chain` and `Layer` implement `Debug`, but no longer implement `Clone`.
+They retain two file descriptors per layer until dropped, which can prolong
+backing-device lifetimes. Open handles preserve input identity across pathname
+replacement; they do not make the contents immutable. Callers needing shared
+ownership can use `Arc<Chain>`; explicit `File::try_clone()` duplicates a handle
+but shares its file offset. Assembly returns an open block-device file.
 
 ```rust,no_run
 use carapace::{Assemble, Chain, DevId, FromGpt};

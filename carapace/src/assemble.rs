@@ -16,30 +16,29 @@ use devmap_snapshot::{
     Discard, Parameters as SnapshotParameters, Persistence, Persistent, Snapshot,
 };
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
-use std::os::unix::fs::FileTypeExt;
+use std::io;
+use std::os::unix::fs::{FileExt, FileTypeExt};
 
 /// Preserve the existing 64 GiB virtual origin size during the API migration.
 const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;
 pub(crate) const MAX_CHAIN_DEPTH: usize = 32;
 
 #[derive(Debug)]
-struct PreparedLayer {
-    data: File,
-    hash: File,
+struct PreparedLayer<'a> {
+    data: &'a File,
+    hash: &'a File,
     superblock: ValidatedVeritySuperblock,
     root: Box<[u8]>,
 }
 
-impl PreparedLayer {
-    fn open(layer: &Layer, root: &[u8], index: usize) -> io::Result<Self> {
-        let mut hash = File::open(&layer.hash)?;
+impl<'a> PreparedLayer<'a> {
+    fn read(layer: &'a Layer, root: &[u8], index: usize) -> io::Result<Self> {
         let mut record = [0; VERITY_SUPERBLOCK_SIZE];
-        hash.read_exact(&mut record)?;
+        layer.hash.read_exact_at(&mut record, 0)?;
         let superblock = ValidatedVeritySuperblock::parse(&record, index)?;
         Ok(Self {
-            data: File::open(&layer.data)?,
-            hash,
+            data: &layer.data,
+            hash: &layer.hash,
             superblock,
             root: root.into(),
         })
@@ -47,9 +46,8 @@ impl PreparedLayer {
 }
 
 impl Chain {
-    /// Open and validate inputs before creating any kernel mappings. Open
-    /// files pin the selected devices/backing files through attachment.
-    fn prepare(&self) -> io::Result<Vec<PreparedLayer>> {
+    /// Independently validate the retained inputs before creating mappings.
+    fn prepare(&self) -> io::Result<Vec<PreparedLayer<'_>>> {
         if self.layers.is_empty() || self.layers.len() > MAX_CHAIN_DEPTH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -60,7 +58,7 @@ impl Chain {
         let mut algorithm = None;
         let mut prepared = Vec::with_capacity(self.layers.len());
         for (index, layer) in self.layers.iter().enumerate().rev() {
-            let layer = PreparedLayer::open(layer, &root, index)?;
+            let layer = PreparedLayer::read(layer, &root, index)?;
             let sb = &layer.superblock;
             if algorithm.is_some_and(|expected| sb.algorithm != expected) {
                 return Err(io::Error::new(
@@ -188,9 +186,9 @@ impl Assembler {
         ))
     }
 
-    fn layer(&self, layer: &PreparedLayer, origin: File, index: usize) -> io::Result<File> {
-        let data = Self::resolve(&layer.data)?;
-        let hash = Self::resolve(&layer.hash)?;
+    fn layer(&self, layer: &PreparedLayer<'_>, origin: File, index: usize) -> io::Result<File> {
+        let data = Self::resolve(layer.data)?;
+        let hash = Self::resolve(layer.hash)?;
         let data_id = DevId::try_from(data.metadata()?)?;
         let hash_id = DevId::try_from(hash.metadata()?)?;
         let origin_id = DevId::try_from(origin.metadata()?)?;
@@ -206,9 +204,9 @@ impl Assembler {
             "CARAPACE-v{}-{data_id}-{hash_id}",
             hex_lower(&layer.root[..16])
         );
-        let mut verity = self.activate(&name, verity_target.data_sectors(), verity_target)?;
+        let verity = self.activate(&name, verity_target.data_sectors(), verity_target)?;
         let mut header = [0; SNAPSHOT_HEADER_SIZE];
-        verity.read_exact(&mut header)?;
+        verity.read_exact_at(&mut header, 0)?;
         ValidatedSnapshotHeader::parse(&header, index)?;
         let verity_id = DevId::try_from(verity.metadata()?)?;
         let name = format!(
@@ -564,7 +562,68 @@ mod tests {
         bytes[88..88 + salt.len()].copy_from_slice(salt);
         std::fs::write(&data, [0; 4096]).unwrap();
         std::fs::write(&hash, bytes).unwrap();
-        Layer { data, hash }
+        Layer {
+            data: File::open(data).unwrap(),
+            hash: File::open(hash).unwrap(),
+        }
+    }
+
+    #[test]
+    fn preparation_uses_retained_files_and_preserves_offsets() {
+        use std::io::{Seek, SeekFrom};
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut input = layer(dir.path(), 0, "sha256", &[0; 32]);
+        input.data.seek(SeekFrom::Start(19)).unwrap();
+        input.hash.seek(SeekFrom::Start(37)).unwrap();
+        let data_inode = input.data.metadata().unwrap().ino();
+        let hash_inode = input.hash.metadata().unwrap().ino();
+        // New files at the old names must not redirect assembly's inputs.
+        for name in ["data-0", "hash-0"] {
+            std::fs::remove_file(dir.path().join(name)).unwrap();
+            std::fs::write(dir.path().join(name), b"replacement").unwrap();
+        }
+        let mut chain = Chain {
+            root: vec![1; 32].into(),
+            layers: vec![input],
+        };
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let prepared = chain.prepare().unwrap();
+                        assert_eq!(prepared[0].data.metadata().unwrap().ino(), data_inode);
+                        assert_eq!(prepared[0].hash.metadata().unwrap().ino(), hash_inode);
+                    })
+                })
+                .collect();
+            for job in jobs {
+                job.join().unwrap();
+            }
+        });
+        assert_eq!(chain.layers[0].data.stream_position().unwrap(), 19);
+        assert_eq!(chain.layers[0].hash.stream_position().unwrap(), 37);
+    }
+
+    #[test]
+    fn preparation_revalidates_changed_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = Chain {
+            root: vec![1; 32].into(),
+            layers: vec![layer(dir.path(), 0, "sha256", &[0; 32])],
+        };
+        chain.prepare().unwrap();
+        // An open read-only handle does not prevent another writer changing it.
+        let writer = OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("hash-0"))
+            .unwrap();
+        writer.write_all_at(b"badmagic", 0).unwrap();
+        assert_eq!(
+            chain.prepare().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
@@ -577,13 +636,12 @@ mod tests {
             chain.prepare().unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
-        chain.layers = vec![
-            Layer {
-                data: "/missing".into(),
-                hash: "/missing".into()
-            };
-            MAX_CHAIN_DEPTH + 1
-        ];
+        chain.layers = (0..=MAX_CHAIN_DEPTH)
+            .map(|_| Layer {
+                data: File::open("/dev/null").unwrap(),
+                hash: File::open("/dev/null").unwrap(),
+            })
+            .collect();
         assert_eq!(
             chain.prepare().unwrap_err().kind(),
             io::ErrorKind::InvalidInput

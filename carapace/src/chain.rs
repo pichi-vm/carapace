@@ -10,29 +10,32 @@
 //! Output order: BASE → TOP. Activation builds the read stack
 //! bottom-up, so this matches the consumer's natural iteration.
 //!
-//! All I/O is funneled through the [`ChainResolver`] trait so the
+//! Partition opening is delegated to the [`ChainResolver`] trait so the
 //! decision logic (cycle / depth / sentinel / salt-too-short) is
-//! unit-testable without sysfs or disk fixtures.
+//! unit-testable with temporary files, without sysfs or block devices.
 
 use crate::partition::ChainResolver;
+use crate::verity::superblock::VERITY_SUPERBLOCK_SIZE;
 use crate::verity::{Algorithm, ValidatedVeritySuperblock};
+use crate::Layer;
 use std::collections::HashSet;
 use std::io;
+use std::os::unix::fs::FileExt;
 
 /// Hard cap on chain depth.
 use crate::assemble::MAX_CHAIN_DEPTH;
 
 /// Walk the chain starting at `trusted_root` backward via salt prefixes,
-/// returning an ordered list of `(data_path, hash_path)` pairs in BASE → TOP
+/// returning an ordered list of open layers in BASE → TOP
 /// order.
 ///
 /// This is the PARTUUID-discovery pass used by `FromGpt::from_gpt`. It
-/// produces `Layer` paths; `assemble` later re-reads and re-validates
+/// retains the files inspected during discovery; `assemble` later rereads and revalidates
 /// every superblock independently.
 pub(crate) fn walk_chain(
     trusted_root: &[u8],
     resolver: &dyn ChainResolver,
-) -> io::Result<Vec<(std::path::PathBuf, std::path::PathBuf)>> {
+) -> io::Result<Vec<Layer>> {
     if trusted_root.len() < 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -43,7 +46,7 @@ pub(crate) fn walk_chain(
         ));
     }
 
-    let mut layers_top_down: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let mut layers_top_down = Vec::new();
     let mut visited: HashSet<[u8; 16]> = HashSet::new();
     let mut current_root = [0u8; 64];
     let init_len = trusted_root.len().min(current_root.len());
@@ -76,13 +79,15 @@ pub(crate) fn walk_chain(
             ));
         }
 
-        let (hash, sb_bytes) = resolver
+        let hash = resolver
             .resolve_hash(&hash_partuuid)
             .map_err(|e| wrap_partition_not_found(e, layers_top_down.len(), "hash"))?;
         let data = resolver
             .resolve_data(&data_partuuid)
             .map_err(|e| wrap_partition_not_found(e, layers_top_down.len(), "data"))?;
 
+        let mut sb_bytes = [0; VERITY_SUPERBLOCK_SIZE];
+        hash.read_exact_at(&mut sb_bytes, 0)?;
         let superblock = ValidatedVeritySuperblock::parse(&sb_bytes, layers_top_down.len())?;
         let digest_size = superblock.algorithm.digest_size();
 
@@ -118,7 +123,7 @@ pub(crate) fn walk_chain(
         }
 
         let is_base = superblock.is_base();
-        layers_top_down.push((data.path.clone(), hash.path.clone()));
+        layers_top_down.push(Layer { data, hash });
 
         if is_base {
             break;
@@ -156,10 +161,9 @@ fn wrap_partition_not_found(e: io::Error, depth: usize, role: &'static str) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::partition::ResolvedPartition;
     use crate::verity::superblock::{VERITY_SIGNATURE, VERITY_SUPERBLOCK_SIZE};
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::fs::File;
 
     fn synth_sb(salt_size: u16, salt_prefix: &[u8]) -> [u8; VERITY_SUPERBLOCK_SIZE] {
         synth_sb_alg("sha256", salt_size, salt_prefix)
@@ -183,48 +187,35 @@ mod tests {
 
     #[derive(Default)]
     struct MockResolver {
-        datas: HashMap<[u8; 16], ResolvedPartition>,
-        hashes: HashMap<[u8; 16], (ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])>,
+        datas: HashMap<[u8; 16], File>,
+        hashes: HashMap<[u8; 16], File>,
     }
 
     impl MockResolver {
-        fn part(label: &str) -> ResolvedPartition {
-            ResolvedPartition {
-                path: PathBuf::from(format!("/dev/mock-{label}")),
-            }
-        }
         fn with_data(mut self, partuuid: [u8; 16]) -> Self {
-            self.datas.insert(partuuid, Self::part("data"));
+            self.datas.insert(partuuid, tempfile::tempfile().unwrap());
             self
         }
         fn with_hash(mut self, partuuid: [u8; 16], sb: &[u8; VERITY_SUPERBLOCK_SIZE]) -> Self {
-            self.hashes.insert(partuuid, (Self::part("hash"), *sb));
+            let file = tempfile::tempfile().unwrap();
+            file.write_all_at(sb, 0).unwrap();
+            self.hashes.insert(partuuid, file);
             self
         }
     }
 
     impl ChainResolver for MockResolver {
-        fn resolve_data(&self, p: &[u8; 16]) -> io::Result<&ResolvedPartition> {
-            self.datas.get(p).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("partition not found: PARTUUID {:02x?}", p),
-                )
-            })
+        fn resolve_data(&self, p: &[u8; 16]) -> io::Result<File> {
+            self.datas
+                .get(p)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+                .try_clone()
         }
-        fn resolve_hash(
-            &self,
-            p: &[u8; 16],
-        ) -> io::Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])> {
+        fn resolve_hash(&self, p: &[u8; 16]) -> io::Result<File> {
             self.hashes
                 .get(p)
-                .map(|(part, sb)| (part, *sb))
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("partition not found: PARTUUID {:02x?}", p),
-                    )
-                })
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+                .try_clone()
         }
     }
 
@@ -233,6 +224,40 @@ mod tests {
         r[..16].fill(data);
         r[16..].fill(hash);
         r
+    }
+
+    #[test]
+    fn discovery_retains_inspected_files_without_changing_offsets() {
+        use std::io::{Seek, SeekFrom};
+        use std::os::unix::fs::MetadataExt;
+
+        let mut resolver = MockResolver::default()
+            .with_data([0xAA; 16])
+            .with_hash([0xBB; 16], &synth_sb(32, &[0; 32]));
+        resolver
+            .hashes
+            .get_mut(&[0xBB; 16])
+            .unwrap()
+            .seek(SeekFrom::Start(71))
+            .unwrap();
+        let hash_inode = resolver.hashes[&[0xBB; 16]].metadata().unwrap().ino();
+        let mut layers = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
+        drop(resolver);
+        assert_eq!(layers[0].hash.metadata().unwrap().ino(), hash_inode);
+        assert_eq!(layers[0].hash.stream_position().unwrap(), 71);
+        let mut bytes = [0; VERITY_SUPERBLOCK_SIZE];
+        layers[0].hash.read_exact_at(&mut bytes, 0).unwrap();
+        assert_eq!(bytes, synth_sb(32, &[0; 32]));
+        // Discovery's successful validation must not be reused by assembly.
+        layers[0].hash.write_all_at(b"badmagic", 0).unwrap();
+        let chain = crate::Chain {
+            root: root_from(0xAA, 0xBB).into(),
+            layers,
+        };
+        assert_eq!(
+            crate::Assemble::assemble(&chain).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
@@ -257,7 +282,11 @@ mod tests {
         let layers = walk_chain(&root_from(0xCC, 0xDD), &resolver).unwrap();
         assert_eq!(layers.len(), 2);
         // BASE is first (the one with zero-prefix salt).
-        assert_eq!(layers[0].0, PathBuf::from("/dev/mock-data"));
+        let mut salt = [1; 32];
+        layers[0].hash.read_exact_at(&mut salt, 88).unwrap();
+        assert_eq!(salt, [0; 32]);
+        layers[1].hash.read_exact_at(&mut salt, 88).unwrap();
+        assert_eq!(salt, top_salt);
     }
 
     #[test]

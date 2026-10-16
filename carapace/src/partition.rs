@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Resolve raw 16-byte PARTUUIDs to partition device paths + dev_t,
+//! Resolve raw 16-byte PARTUUIDs to open partition files,
 //! using only kernel-provided information from `/sys/class/block/*/uevent`.
 //! No udev required — `udev` populates `/dev/disk/by-partuuid/*` symlinks
 //! from this same data, but the data itself comes from the kernel's GPT
 //! parser at `losetup --partscan` (or disk attach) time.
 
-use crate::verity::superblock::VERITY_SUPERBLOCK_SIZE;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -23,13 +22,10 @@ pub(crate) struct ResolvedPartition {
 /// Pluggable resolver for the chain walker. The default impl is
 /// [`PartitionMap`] (sysfs-backed), but the chain walker takes
 /// `&dyn ChainResolver` so unit tests can substitute an in-memory
-/// fake without touching `/sys/class/block` or doing real disk I/O.
+/// fake backed by temporary files without touching `/sys/class/block`.
 pub(crate) trait ChainResolver {
-    fn resolve_data(&self, partuuid: &[u8; 16]) -> io::Result<&ResolvedPartition>;
-    fn resolve_hash(
-        &self,
-        partuuid: &[u8; 16],
-    ) -> io::Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])>;
+    fn resolve_data(&self, partuuid: &[u8; 16]) -> io::Result<File>;
+    fn resolve_hash(&self, partuuid: &[u8; 16]) -> io::Result<File>;
 }
 
 /// All carapace-relevant GPT partitions visible to the kernel,
@@ -99,21 +95,12 @@ impl PartitionMap {
 }
 
 impl ChainResolver for PartitionMap {
-    fn resolve_data(&self, partuuid: &[u8; 16]) -> io::Result<&ResolvedPartition> {
-        self.find(partuuid)
+    fn resolve_data(&self, partuuid: &[u8; 16]) -> io::Result<File> {
+        File::open(&self.find(partuuid)?.path)
     }
 
-    fn resolve_hash(
-        &self,
-        partuuid: &[u8; 16],
-    ) -> io::Result<(&ResolvedPartition, [u8; VERITY_SUPERBLOCK_SIZE])> {
-        use std::fs::OpenOptions;
-
-        let part = self.find(partuuid)?;
-        let mut f = OpenOptions::new().read(true).open(&part.path)?;
-        let mut buf = [0u8; VERITY_SUPERBLOCK_SIZE];
-        f.read_exact(&mut buf)?;
-        Ok((part, buf))
+    fn resolve_hash(&self, partuuid: &[u8; 16]) -> io::Result<File> {
+        File::open(&self.find(partuuid)?.path)
     }
 }
 

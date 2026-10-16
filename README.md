@@ -26,7 +26,8 @@ fn attach(root: &[u8]) -> std::io::Result<std::fs::File> {
 ```
 
 `Chain` can also be constructed directly from a trusted root and ordered
-`Layer { data, hash }` paths, base to top. Assembly returns a read-only file
+`Layer { data, hash }` open files, base to top. Assembly independently
+validates the retained inputs without changing their file offsets. It returns a read-only file
 with deferred removal already scheduled. The file, clones, mounts, and upper
 mappings retain the stack until their last holder closes.
 

@@ -15,7 +15,7 @@
 //! # Library API
 //!
 //! - [`Chain`] — an ordered list of layers (base → top) plus a trusted root.
-//! - [`Layer`] — a data/hash path pair for one scute.
+//! - [`Layer`] — open data/hash files for one scute.
 //! - [`Assemble::assemble`] — build the dm stack and return a [`std::fs::File`].
 //! - `FromGpt` — discover a `Chain` by PARTUUID walk (feature `gpt`).
 //! - `AsyncFromGpt` — Tokio discovery (features `gpt` + `tokio`).
@@ -36,22 +36,24 @@ mod verity;
 
 pub use devmap_linux::DevId;
 
+use std::fs::File;
 use std::io;
-use std::path::PathBuf;
 
-/// One scute's data + hash partition paths (owned).
-#[derive(Debug, Clone)]
+/// One scute's open data and hash inputs.
+#[derive(Debug)]
 pub struct Layer {
-    /// Block-device or file path for the data partition.
-    pub data: PathBuf,
-    /// Block-device or file path for the hash partition.
-    pub hash: PathBuf,
+    /// Open, readable block device or regular file containing the data.
+    pub data: File,
+    /// Open, readable block device or regular file containing the hash tree.
+    pub hash: File,
 }
 
 /// An ordered chain of scutes, base → top, plus the operator-supplied
 /// trusted root hash. Produced by `FromGpt::from_gpt` or constructed
-/// directly by an in-process caller that already knows the layer paths.
-#[derive(Debug, Clone)]
+/// directly from caller-opened files. Inputs remain open until the chain is
+/// dropped. Assembly rereads their headers using positional I/O; it neither
+/// trusts discovery-time validation nor changes the input file offsets.
+#[derive(Debug)]
 pub struct Chain {
     /// The trusted chain root (operator-supplied, out-of-band).
     pub root: Box<[u8]>,
@@ -90,11 +92,7 @@ pub trait FromGpt: Sized {
 impl FromGpt for Chain {
     fn from_gpt(root: &[u8]) -> io::Result<Self> {
         let map = partition::PartitionMap::scan()?;
-        let paths = chain::walk_chain(root, &map)?;
-        let layers = paths
-            .into_iter()
-            .map(|(data, hash)| Layer { data, hash })
-            .collect();
+        let layers = chain::walk_chain(root, &map)?;
         Ok(Chain {
             root: root.to_vec().into_boxed_slice(),
             layers,
