@@ -11,7 +11,7 @@
 //!      `/sys/class/block/loopXpY/uevent` with PARTUUIDs synchronously).
 //!   3. Calls `carapace::Chain::from_gpt(&bytes)?.assemble()` (library API).
 //!   4. Mounts `/dev/dm-{minor}` read-only and verifies the expected
-//!      per-scute files exist with the right content (proves cross-layer
+//!      per-scute files exist with the right content (proves cross-scute
 //!      composition end to end, not just byte parsing).
 //!   5. Unmounts, then drops the device file — DM_DEFERRED_REMOVE
 //!      cascades the teardown.

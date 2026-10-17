@@ -19,7 +19,7 @@ path = "src/main.rs"
 default = ["gpt"]
 # GPT/PARTUUID discovery: `Chain::from_gpt` scans block-device PARTUUIDs.
 gpt = []
-# File-backed layers: loop-attach `data`/`hash` files via lodown. corium is
+# File-backed scutes: loop-attach `data`/`hash` files via lodown. corium is
 # block-only and can omit this.
 loop = ["dep:lodown"]
 # Async discovery adapter (with gpt); the default build needs no runtime.
@@ -38,7 +38,7 @@ devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb7600
 devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
 devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
 devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
-# Safe loop-device wrapper for file-backed layers (feature `loop`).
+# Safe loop-device wrapper for file-backed scutes (feature `loop`).
 lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 # zerocopy for snapshot header parsing.

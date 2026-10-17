@@ -12,7 +12,7 @@ This specification has three levels:
 2. **GPT deployment pattern.** An optional convention for deploying scutes as GPT partitions with Discoverable Disk Image (DDI) PARTUUIDs. Useful when self-describing on-disk layout matters. Opt-in.
 3. **Informative implementation notes.** Non-normative guidance for specific contexts (e.g., confidential-VM VMMs).
 
-Any application needing compositional read-only block layers with cryptographic binding to a single trust anchor can use this mechanism.
+Any application needing compositional read-only block devices with cryptographic binding to a single trust anchor can use this mechanism.
 
 ## Terminology
 
@@ -83,7 +83,7 @@ The diagram below shows a complete carapace with three scutes from the perspecti
 
 ![Carapace with three scutes](carapace.excalidraw.svg)
 
-The numbered steps trace the assembly algorithm. The tool works from the bottom up, building each layer's virtual devices once it has the expected root for that layer:
+The numbered steps trace the assembly algorithm. The tool works from the bottom up, building each scute's virtual devices once it has the expected root for that scute:
 
 1. Read `root₀` from `hash₁`'s salt field.
 2. Build `dm-verity₀` from `data₀` + `hash₀`, using `root₀` as the expected root.
@@ -97,7 +97,7 @@ The numbered steps trace the assembly algorithm. The tool works from the bottom 
 
 `dm-snapshot₂` now contains the trusted read-only filesystem — this is the composed carapace.
 
-The only input from outside the carapace is `root₂`. Every other root value is read from the salt prefix of the hash file one layer above. Scute 0 is the base: its salt is entirely builder-defined (conventionally random bytes) with no prefix constraint, and its snapshot's origin is `dm-zero`. If at any step `dm-verityᵢ` refuses to activate with the supplied root — because the hash tree in `hashᵢ` does not hash to the expected value — assembly fails and no dm-snapshot is produced.
+The only input from outside the carapace is `root₂`. Every other root value is read from the salt prefix of the hash file one scute above. Scute 0 is the base: its salt is entirely builder-defined (conventionally random bytes) with no prefix constraint, and its snapshot's origin is `dm-zero`. If at any step `dm-verityᵢ` refuses to activate with the supplied root — because the hash tree in `hashᵢ` does not hash to the expected value — assembly fails and no dm-snapshot is produced.
 
 ## On-Disk Format (Normative)
 
@@ -116,7 +116,7 @@ The chain parameters are:
 | Superblock version (`version`) | dm-verity superblock |
 | Snapshot chunk size (`chunk_size`) | dm-snapshot `disk_header` |
 
-All non-base scutes in a carapace MUST declare chain parameters identical to the base scute's. The consumer MUST validate this and reject any chain with differing parameters between layers.
+All non-base scutes in a carapace MUST declare chain parameters identical to the base scute's. The consumer MUST validate this and reject any chain with differing parameters between scutes.
 
 Every scute's salt prefix is `digest_size` bytes (e.g., 32 bytes for `sha256`, 64 bytes for `sha512`), so `salt_size` MUST be at least `digest_size`. Non-base scutes carry the parent root in the prefix; the base scute carries `digest_size` zero bytes as a sentinel.
 
@@ -248,7 +248,7 @@ A builder produces a carapace by constructing each scute's data file (a dm-snaps
 
 For each scute:
 
-- The data file MUST be constructed so that, when used as a dm-snapshot CoW device layered on top of the scute at position `i−1` (or dm-zero, for the base), it produces the intended content for this layer.
+- The data file MUST be constructed so that, when used as a dm-snapshot CoW device layered on top of the scute at position `i−1` (or dm-zero, for the base), it produces the intended content for this scute.
 - The hash file MUST be constructed with `chain_params` matching those of the base scute, with `salt_size` and `salt` contents satisfying the salt structure rules (see [hash File Layout](#hash-file-layout)).
 - `rootᵢ` is the dm-verity root hash computed from the data file and the full salt.
 
@@ -279,7 +279,7 @@ Given an ordered sequence of scutes and a trusted `rootₙ₋₁`, a consumer MU
 
 **Chunk-size consistency.** The `chunk_size` field in each scute's dm-snapshot header (read through the activated dm-verity device so that it is integrity-protected) MUST be identical across all scutes and MUST equal the whitelisted `chunk_size` (see [Parameter Whitelist](#parameter-whitelist)).
 
-**Device setup.** Once the above checks pass, the consumer activates the device-mapper stack bottom-up: a dm-zero device with the mapping table entry `ZERO_START ZERO_COUNT zero`, then for each scute in order `0..N` a dm-verity device over the data and hash files (using the computed `rootᵢ` as the expected root and the superblock's salt contents), then a dm-snapshot device whose origin is the previous layer (dm-zero for the base, the prior snapshot otherwise) and whose CoW device is the current scute's dm-verity device. The top snapshot is the composed carapace.
+**Device setup.** Once the above checks pass, the consumer activates the device-mapper stack bottom-up: a dm-zero device with the mapping table entry `ZERO_START ZERO_COUNT zero`, then for each scute in order `0..N` a dm-verity device over the data and hash files (using the computed `rootᵢ` as the expected root and the superblock's salt contents), then a dm-snapshot device whose origin is the previous scute (dm-zero for the base, the prior snapshot otherwise) and whose CoW device is the current scute's dm-verity device. The top snapshot is the composed carapace.
 
 Any failure at any step is a hard failure; the composed device MUST NOT be exposed. Subsequent runtime integrity failures from dm-verity on block reads are also hard failures.
 
@@ -383,7 +383,7 @@ The GPT deployment pattern is deliberately shaped to compose with systemd's exis
 
 **A dedicated assembler, not `systemd-veritysetup`.** A carapace is a salt-chained *stack* of dm-snapshot(cow)+dm-verity scutes, not the single data+hash pair `systemd-veritysetup-generator` handles. Integration therefore takes the form of a peer generator (mirroring `systemd-veritysetup-generator`): it reads `carapacehash=` and emits a unit, ordered `Before=initrd-root-device.target`, that walks the chain and assembles `/dev/mapper/root`. `carapacehash=` deliberately does *not* reuse `roothash=`, so the two generators never contend for the same root.
 
-**The assembler owns `/dev/mapper/<name>`, not udev.** The stack comes up in the initramfs *before* `systemd-udevd`, and each layer is a raw `/dev/mapper/control` ioctl that carries no udev synchronization cookie. The assembler therefore creates the operator-visible `/dev/mapper/<name>` symlink (→ the kernel-synchronous `/dev/dm-<minor>`) itself rather than waiting for udev to catch up. On the top alias's resume it sets the udev *primary-source* flag in the ioctl cookie (`event_nr`), so when `systemd-udevd` later coldplugs the device its DM rules recognize the activation as authoritative — creating the systemd `dev-mapper-<name>.device` alias and leaving the symlink in place instead of tearing it down. The two mechanisms are complementary: the symlink guarantees the path exists the instant `attach` returns; the cookie keeps udev cooperative once it starts.
+**The assembler owns `/dev/mapper/<name>`, not udev.** The stack comes up in the initramfs *before* `systemd-udevd`, and each scute is a raw `/dev/mapper/control` ioctl that carries no udev synchronization cookie. The assembler therefore creates the operator-visible `/dev/mapper/<name>` symlink (→ the kernel-synchronous `/dev/dm-<minor>`) itself rather than waiting for udev to catch up. On the top alias's resume it sets the udev *primary-source* flag in the ioctl cookie (`event_nr`), so when `systemd-udevd` later coldplugs the device its DM rules recognize the activation as authoritative — creating the systemd `dev-mapper-<name>.device` alias and leaving the symlink in place instead of tearing it down. The two mechanisms are complementary: the symlink guarantees the path exists the instant `attach` returns; the cookie keeps udev cooperative once it starts.
 
 **PARTUUID discovery matches the DPS.** The [PARTUUID Assignment](#partuuid-assignment) rule — data ← `root[0..16]`, hash ← `root[16..32]` — is the same encoding the Discoverable Partitions Specification uses for verity (data partition ← first 128 bits of the root hash, verity partition ← the last 128 bits). The scute type GUIDs ([Partition Types](#partition-types)) are carapace-defined; registering them with the DPS is the natural path to first-class recognition. They are intentionally arch-neutral: one carapace is one image, so arch-based root selection (the reason the DPS verity types are per-architecture) does not apply.
 
@@ -399,7 +399,7 @@ The GPT deployment pattern is deliberately shaped to compose with systemd's exis
 
 Trust and discovery are solved by separate mechanisms:
 
-- **Trust** (binding each layer to its parent): the salt chain. Any tampering cascades to `rootₙ₋₁` and fails the trust-anchor check.
+- **Trust** (binding each scute to its parent): the salt chain. Any tampering cascades to `rootₙ₋₁` and fails the trust-anchor check.
 - **Discovery** (finding which blobs form each scute): deployment-specific. Under the GPT pattern, DDI PARTUUIDs.
 
 Discovery is unverified; trust is established by the chain terminating at the trusted `rootₙ₋₁`.

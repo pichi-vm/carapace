@@ -7,7 +7,7 @@ use crate::snapshot::{ValidatedSnapshotHeader, SNAPSHOT_HEADER_SIZE};
 use crate::util::hex_lower;
 use crate::verity::superblock::VERITY_SUPERBLOCK_SIZE;
 use crate::verity::ValidatedVeritySuperblock;
-use crate::{Chain, Layer};
+use crate::{Chain, Scute};
 use devmap_core::{BlockSize, Span};
 use devmap_linux::records::Records;
 use devmap_linux::targets::{Target, Zero};
@@ -24,21 +24,21 @@ const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;
 pub(crate) const MAX_CHAIN_DEPTH: usize = 32;
 
 #[derive(Debug)]
-struct PreparedLayer<'a> {
+struct PreparedScute<'a> {
     data: &'a File,
     hash: &'a File,
     superblock: ValidatedVeritySuperblock,
     root: Box<[u8]>,
 }
 
-impl<'a> PreparedLayer<'a> {
-    fn read(layer: &'a Layer, root: &[u8], index: usize) -> io::Result<Self> {
+impl<'a> PreparedScute<'a> {
+    fn read(scute: &'a Scute, root: &[u8], index: usize) -> io::Result<Self> {
         let mut record = [0; VERITY_SUPERBLOCK_SIZE];
-        layer.hash.read_exact_at(&mut record, 0)?;
+        scute.hash.read_exact_at(&mut record, 0)?;
         let superblock = ValidatedVeritySuperblock::parse(&record, index)?;
         Ok(Self {
-            data: &layer.data,
-            hash: &layer.hash,
+            data: &scute.data,
+            hash: &scute.hash,
             superblock,
             root: root.into(),
         })
@@ -47,19 +47,19 @@ impl<'a> PreparedLayer<'a> {
 
 impl Chain {
     /// Independently validate the retained inputs before creating mappings.
-    fn prepare(&self) -> io::Result<Vec<PreparedLayer<'_>>> {
-        if self.layers.is_empty() || self.layers.len() > MAX_CHAIN_DEPTH {
+    fn prepare(&self) -> io::Result<Vec<PreparedScute<'_>>> {
+        if self.scutes.is_empty() || self.scutes.len() > MAX_CHAIN_DEPTH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("a chain needs 1..={MAX_CHAIN_DEPTH} layers"),
+                format!("a chain needs 1..={MAX_CHAIN_DEPTH} scutes"),
             ));
         }
         let mut root = self.root.clone();
         let mut algorithm = None;
-        let mut prepared = Vec::with_capacity(self.layers.len());
-        for (index, layer) in self.layers.iter().enumerate().rev() {
-            let layer = PreparedLayer::read(layer, &root, index)?;
-            let sb = &layer.superblock;
+        let mut prepared = Vec::with_capacity(self.scutes.len());
+        for (index, scute) in self.scutes.iter().enumerate().rev() {
+            let scute = PreparedScute::read(scute, &root, index)?;
+            let sb = &scute.superblock;
             if algorithm.is_some_and(|expected| sb.algorithm != expected) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -80,7 +80,7 @@ impl Chain {
                 ));
             }
             root = sb.full_salt()[..sb.algorithm.digest_size()].into();
-            prepared.push(layer);
+            prepared.push(scute);
         }
         prepared.reverse();
         Ok(prepared)
@@ -92,9 +92,9 @@ impl Chain {
             control: Control::open()?,
         };
         let mut origin = assembler.activate("CARAPACE-z", ZERO_COUNT_SECTORS, Zero)?;
-        for (index, layer) in prepared.iter().enumerate() {
+        for (index, scute) in prepared.iter().enumerate() {
             origin = assembler
-                .layer(layer, origin, index)
+                .scute(scute, origin, index)
                 .map_err(|error| io::Error::new(error.kind(), format!("scute {index}: {error}")))?;
         }
         Ok(origin)
@@ -177,32 +177,32 @@ impl Assembler {
             #[cfg(not(feature = "loop"))]
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "file-backed layers need feature `loop`",
+                "file-backed scutes need feature `loop`",
             ));
         }
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "layer is not a block device or regular file",
+            "scute is not a block device or regular file",
         ))
     }
 
-    fn layer(&self, layer: &PreparedLayer<'_>, origin: File, index: usize) -> io::Result<File> {
-        let data = Self::resolve(layer.data)?;
-        let hash = Self::resolve(layer.hash)?;
+    fn scute(&self, scute: &PreparedScute<'_>, origin: File, index: usize) -> io::Result<File> {
+        let data = Self::resolve(scute.data)?;
+        let hash = Self::resolve(scute.hash)?;
         let data_id = DevId::try_from(data.metadata()?)?;
         let hash_id = DevId::try_from(hash.metadata()?)?;
         let origin_id = DevId::try_from(origin.metadata()?)?;
-        let verity_target = layer
+        let verity_target = scute
             .superblock
             .header
-            .builder(data_id, hash_id, layer.root.clone())?
+            .builder(data_id, hash_id, scute.root.clone())?
             .build();
         // Bind names to both content and backing devices. Different loop
         // attachments of identical content can coexist without replacing a
         // live table; identical block-device inputs still share mappings.
         let name = format!(
             "CARAPACE-v{}-{data_id}-{hash_id}",
-            hex_lower(&layer.root[..16])
+            hex_lower(&scute.root[..16])
         );
         let verity = self.activate(&name, verity_target.data_sectors(), verity_target)?;
         let mut header = [0; SNAPSHOT_HEADER_SIZE];
@@ -211,7 +211,7 @@ impl Assembler {
         let verity_id = DevId::try_from(verity.metadata()?)?;
         let name = format!(
             "CARAPACE-s{}-{origin_id}-{verity_id}",
-            hex_lower(&layer.root[16..32])
+            hex_lower(&scute.root[16..32])
         );
         let snapshot = Snapshot::from(SnapshotParameters {
             origin: origin_id,
@@ -251,8 +251,8 @@ impl Assembler {
     {
         // An independent open file description is required for flock exclusion
         // between assemblers in the same process as well as across processes.
-        // Only publication is serialized; layer I/O and attachment happen outside.
-        // Returned files pin each mapping across the unlocked gaps between layers.
+        // Only publication is serialized; scute I/O and attachment happen outside.
+        // Returned files pin each mapping across the unlocked gaps between scutes.
         let lock = File::open("/dev/mapper/control")?;
         lock.lock()?;
         for _ in 0..8 {
@@ -547,7 +547,7 @@ mod tests {
         drop(replacement);
     }
 
-    fn layer(dir: &Path, index: usize, algorithm: &str, salt: &[u8]) -> Layer {
+    fn scute(dir: &Path, index: usize, algorithm: &str, salt: &[u8]) -> Scute {
         let data = dir.join(format!("data-{index}"));
         let hash = dir.join(format!("hash-{index}"));
         let mut bytes = [0; VERITY_SUPERBLOCK_SIZE];
@@ -562,7 +562,7 @@ mod tests {
         bytes[88..88 + salt.len()].copy_from_slice(salt);
         std::fs::write(&data, [0; 4096]).unwrap();
         std::fs::write(&hash, bytes).unwrap();
-        Layer {
+        Scute {
             data: File::open(data).unwrap(),
             hash: File::open(hash).unwrap(),
         }
@@ -574,7 +574,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut input = layer(dir.path(), 0, "sha256", &[0; 32]);
+        let mut input = scute(dir.path(), 0, "sha256", &[0; 32]);
         input.data.seek(SeekFrom::Start(19)).unwrap();
         input.hash.seek(SeekFrom::Start(37)).unwrap();
         let data_inode = input.data.metadata().unwrap().ino();
@@ -586,7 +586,7 @@ mod tests {
         }
         let mut chain = Chain {
             root: vec![1; 32].into(),
-            layers: vec![input],
+            scutes: vec![input],
         };
         std::thread::scope(|scope| {
             let jobs: Vec<_> = (0..4)
@@ -602,8 +602,8 @@ mod tests {
                 job.join().unwrap();
             }
         });
-        assert_eq!(chain.layers[0].data.stream_position().unwrap(), 19);
-        assert_eq!(chain.layers[0].hash.stream_position().unwrap(), 37);
+        assert_eq!(chain.scutes[0].data.stream_position().unwrap(), 19);
+        assert_eq!(chain.scutes[0].hash.stream_position().unwrap(), 37);
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chain = Chain {
             root: vec![1; 32].into(),
-            layers: vec![layer(dir.path(), 0, "sha256", &[0; 32])],
+            scutes: vec![scute(dir.path(), 0, "sha256", &[0; 32])],
         };
         chain.prepare().unwrap();
         // An open read-only handle does not prevent another writer changing it.
@@ -630,14 +630,14 @@ mod tests {
     fn direct_chains_reject_empty_and_excessive_depth_before_io() {
         let mut chain = Chain {
             root: vec![1; 32].into(),
-            layers: vec![],
+            scutes: vec![],
         };
         assert_eq!(
             chain.prepare().unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
-        chain.layers = (0..=MAX_CHAIN_DEPTH)
-            .map(|_| Layer {
+        chain.scutes = (0..=MAX_CHAIN_DEPTH)
+            .map(|_| Scute {
                 data: File::open("/dev/null").unwrap(),
                 hash: File::open("/dev/null").unwrap(),
             })
@@ -654,7 +654,7 @@ mod tests {
         for length in [0, 31, 33, 64, 65] {
             let chain = Chain {
                 root: vec![1; length].into(),
-                layers: vec![layer(dir.path(), 0, "sha256", &[0; 32])],
+                scutes: vec![scute(dir.path(), 0, "sha256", &[0; 32])],
             };
             assert_eq!(
                 chain.prepare().unwrap_err().kind(),
@@ -663,7 +663,7 @@ mod tests {
         }
         let chain = Chain {
             root: vec![1; 32].into(),
-            layers: vec![layer(dir.path(), 0, "sha256", &[1; 32])],
+            scutes: vec![scute(dir.path(), 0, "sha256", &[1; 32])],
         };
         let error = chain.prepare().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -675,20 +675,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut chain = Chain {
             root: vec![2; 32].into(),
-            layers: vec![
-                layer(dir.path(), 0, "sha256", &[0; 32]),
-                layer(dir.path(), 1, "sha256", &[1; 32]),
+            scutes: vec![
+                scute(dir.path(), 0, "sha256", &[0; 32]),
+                scute(dir.path(), 1, "sha256", &[1; 32]),
             ],
         };
         let prepared = chain.prepare().unwrap();
         assert_eq!(&*prepared[0].root, &[1; 32]);
         assert_eq!(&*prepared[1].root, &[2; 32]);
-        chain.layers[0] = layer(dir.path(), 0, "sha512", &[0; 64]);
+        chain.scutes[0] = scute(dir.path(), 0, "sha512", &[0; 64]);
         let error = chain.prepare().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("algorithm mismatch"));
-        chain.layers[0] = layer(dir.path(), 0, "sha256", &[0; 32]);
-        chain.layers[1] = layer(dir.path(), 1, "sha256", &[0; 32]);
+        chain.scutes[0] = scute(dir.path(), 0, "sha256", &[0; 32]);
+        chain.scutes[1] = scute(dir.path(), 1, "sha256", &[0; 32]);
         assert!(chain
             .prepare()
             .unwrap_err()

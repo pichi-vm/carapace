@@ -17,7 +17,7 @@
 use crate::partition::ChainResolver;
 use crate::verity::superblock::VERITY_SUPERBLOCK_SIZE;
 use crate::verity::{Algorithm, ValidatedVeritySuperblock};
-use crate::Layer;
+use crate::Scute;
 use std::collections::HashSet;
 use std::io;
 use std::os::unix::fs::FileExt;
@@ -26,7 +26,7 @@ use std::os::unix::fs::FileExt;
 use crate::assemble::MAX_CHAIN_DEPTH;
 
 /// Walk the chain starting at `trusted_root` backward via salt prefixes,
-/// returning an ordered list of open layers in BASE → TOP
+/// returning an ordered list of open scutes in BASE → TOP
 /// order.
 ///
 /// This is the PARTUUID-discovery pass used by `FromGpt::from_gpt`. It
@@ -35,7 +35,7 @@ use crate::assemble::MAX_CHAIN_DEPTH;
 pub(crate) fn walk_chain(
     trusted_root: &[u8],
     resolver: &dyn ChainResolver,
-) -> io::Result<Vec<Layer>> {
+) -> io::Result<Vec<Scute>> {
     if trusted_root.len() < 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -46,7 +46,7 @@ pub(crate) fn walk_chain(
         ));
     }
 
-    let mut layers_top_down = Vec::new();
+    let mut scutes_top_down = Vec::new();
     let mut visited: HashSet<[u8; 16]> = HashSet::new();
     let mut current_root = [0u8; 64];
     let init_len = trusted_root.len().min(current_root.len());
@@ -55,12 +55,12 @@ pub(crate) fn walk_chain(
     let mut chain_algo: Option<Algorithm> = None;
 
     loop {
-        if layers_top_down.len() >= MAX_CHAIN_DEPTH {
+        if scutes_top_down.len() >= MAX_CHAIN_DEPTH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "chain walk failed: exceeded MAX_CHAIN_DEPTH ({MAX_CHAIN_DEPTH}) at depth {}",
-                    layers_top_down.len()
+                    scutes_top_down.len()
                 ),
             ));
         }
@@ -74,21 +74,21 @@ pub(crate) fn walk_chain(
                 format!(
                     "chain walk failed: cycle: hash PARTUUID {} revisited at depth {}",
                     crate::util::hex_lower(&hash_partuuid),
-                    layers_top_down.len()
+                    scutes_top_down.len()
                 ),
             ));
         }
 
         let hash = resolver
             .resolve_hash(&hash_partuuid)
-            .map_err(|e| wrap_partition_not_found(e, layers_top_down.len(), "hash"))?;
+            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "hash"))?;
         let data = resolver
             .resolve_data(&data_partuuid)
-            .map_err(|e| wrap_partition_not_found(e, layers_top_down.len(), "data"))?;
+            .map_err(|e| wrap_partition_not_found(e, scutes_top_down.len(), "data"))?;
 
         let mut sb_bytes = [0; VERITY_SUPERBLOCK_SIZE];
         hash.read_exact_at(&mut sb_bytes, 0)?;
-        let superblock = ValidatedVeritySuperblock::parse(&sb_bytes, layers_top_down.len())?;
+        let superblock = ValidatedVeritySuperblock::parse(&sb_bytes, scutes_top_down.len())?;
         let digest_size = superblock.algorithm.digest_size();
 
         match chain_algo {
@@ -113,7 +113,7 @@ pub(crate) fn walk_chain(
                     format!(
                         "chain walk failed: algorithm mismatch at depth {}: \
                          scute has {} but chain_params.algorithm = {}",
-                        layers_top_down.len(),
+                        scutes_top_down.len(),
                         superblock.algorithm.name(),
                         expected.name()
                     ),
@@ -123,7 +123,7 @@ pub(crate) fn walk_chain(
         }
 
         let is_base = superblock.is_base();
-        layers_top_down.push(Layer { data, hash });
+        scutes_top_down.push(Scute { data, hash });
 
         if is_base {
             break;
@@ -133,9 +133,9 @@ pub(crate) fn walk_chain(
         current_root[..digest_size].copy_from_slice(&salt[..digest_size]);
     }
 
-    let mut layers = layers_top_down;
-    layers.reverse();
-    Ok(layers)
+    let mut scutes = scutes_top_down;
+    scutes.reverse();
+    Ok(scutes)
 }
 
 /// Re-wrap a `NotFound` from partition resolution into `InvalidData` with
@@ -241,18 +241,18 @@ mod tests {
             .seek(SeekFrom::Start(71))
             .unwrap();
         let hash_inode = resolver.hashes[&[0xBB; 16]].metadata().unwrap().ino();
-        let mut layers = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
+        let mut scutes = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
         drop(resolver);
-        assert_eq!(layers[0].hash.metadata().unwrap().ino(), hash_inode);
-        assert_eq!(layers[0].hash.stream_position().unwrap(), 71);
+        assert_eq!(scutes[0].hash.metadata().unwrap().ino(), hash_inode);
+        assert_eq!(scutes[0].hash.stream_position().unwrap(), 71);
         let mut bytes = [0; VERITY_SUPERBLOCK_SIZE];
-        layers[0].hash.read_exact_at(&mut bytes, 0).unwrap();
+        scutes[0].hash.read_exact_at(&mut bytes, 0).unwrap();
         assert_eq!(bytes, synth_sb(32, &[0; 32]));
         // Discovery's successful validation must not be reused by assembly.
-        layers[0].hash.write_all_at(b"badmagic", 0).unwrap();
+        scutes[0].hash.write_all_at(b"badmagic", 0).unwrap();
         let chain = crate::Chain {
             root: root_from(0xAA, 0xBB).into(),
-            layers,
+            scutes,
         };
         assert_eq!(
             crate::Assemble::assemble(&chain).unwrap_err().kind(),
@@ -265,8 +265,8 @@ mod tests {
         let resolver = MockResolver::default()
             .with_data([0xAA; 16])
             .with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]));
-        let layers = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
-        assert_eq!(layers.len(), 1);
+        let scutes = walk_chain(&root_from(0xAA, 0xBB), &resolver).unwrap();
+        assert_eq!(scutes.len(), 1);
     }
 
     #[test]
@@ -279,13 +279,13 @@ mod tests {
             .with_hash([0xBB; 16], &synth_sb(32, &[0u8; 32]))
             .with_data([0xCC; 16])
             .with_hash([0xDD; 16], &synth_sb(32, &top_salt));
-        let layers = walk_chain(&root_from(0xCC, 0xDD), &resolver).unwrap();
-        assert_eq!(layers.len(), 2);
+        let scutes = walk_chain(&root_from(0xCC, 0xDD), &resolver).unwrap();
+        assert_eq!(scutes.len(), 2);
         // BASE is first (the one with zero-prefix salt).
         let mut salt = [1; 32];
-        layers[0].hash.read_exact_at(&mut salt, 88).unwrap();
+        scutes[0].hash.read_exact_at(&mut salt, 88).unwrap();
         assert_eq!(salt, [0; 32]);
-        layers[1].hash.read_exact_at(&mut salt, 88).unwrap();
+        scutes[1].hash.read_exact_at(&mut salt, 88).unwrap();
         assert_eq!(salt, top_salt);
     }
 
@@ -371,8 +371,8 @@ mod tests {
             *b = 0x40 + i as u8;
         }
 
-        let layers = walk_chain(&trusted_root, &resolver).unwrap();
-        assert_eq!(layers.len(), 1);
+        let scutes = walk_chain(&trusted_root, &resolver).unwrap();
+        assert_eq!(scutes.len(), 1);
     }
 
     #[test]

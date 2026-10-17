@@ -4,7 +4,7 @@
 //! carapace — read-side library for carapace block-device chains.
 //!
 //! Assembles a cryptographically-bound chain of content-addressable
-//! block-device layers ("scutes") into a unified, integrity-protected,
+//! block-device scutes into a unified, integrity-protected,
 //! read-only device anchored by a single trusted root. Given a trusted
 //! chain root, this library walks the partitions the kernel exposes via
 //! `/sys/class/block/*/uevent` (PARTUUID lookup), validates every scute's
@@ -14,8 +14,8 @@
 //!
 //! # Library API
 //!
-//! - [`Chain`] — an ordered list of layers (base → top) plus a trusted root.
-//! - [`Layer`] — open data/hash files for one scute.
+//! - [`Chain`] — an ordered list of scutes (base → top) plus a trusted root.
+//! - [`Scute`] — open data/hash files for one scute.
 //! - [`Assemble::assemble`] — build the dm stack and return a [`std::fs::File`].
 //! - `FromGpt` — discover a `Chain` by PARTUUID walk (feature `gpt`).
 //! - `AsyncFromGpt` — Tokio discovery (features `gpt` + `tokio`).
@@ -41,7 +41,7 @@ use std::io;
 
 /// One scute's open data and hash inputs.
 #[derive(Debug)]
-pub struct Layer {
+pub struct Scute {
     /// Open, readable block device or regular file containing the data.
     pub data: File,
     /// Open, readable block device or regular file containing the hash tree.
@@ -57,8 +57,8 @@ pub struct Layer {
 pub struct Chain {
     /// The trusted chain root (operator-supplied, out-of-band).
     pub root: Box<[u8]>,
-    /// Layers in BASE → TOP order.
-    pub layers: Vec<Layer>,
+    /// Scutes in BASE → TOP order.
+    pub scutes: Vec<Scute>,
 }
 
 /// Assemble a chain into a read-only block device.
@@ -92,10 +92,10 @@ pub trait FromGpt: Sized {
 impl FromGpt for Chain {
     fn from_gpt(root: &[u8]) -> io::Result<Self> {
         let map = partition::PartitionMap::scan()?;
-        let layers = chain::walk_chain(root, &map)?;
+        let scutes = chain::walk_chain(root, &map)?;
         Ok(Chain {
             root: root.to_vec().into_boxed_slice(),
-            layers,
+            scutes,
         })
     }
 }

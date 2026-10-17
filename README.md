@@ -26,7 +26,7 @@ fn attach(root: &[u8]) -> std::io::Result<std::fs::File> {
 ```
 
 `Chain` can also be constructed directly from a trusted root and ordered
-`Layer { data, hash }` open files, base to top. Assembly independently
+`Scute { data, hash }` open files, base to top. Assembly independently
 validates the retained inputs without changing their file offsets. It returns a read-only file
 with deferred removal already scheduled. The file, clones, mounts, and upper
 mappings retain the stack until their last holder closes.
@@ -34,7 +34,7 @@ mappings retain the stack until their last holder closes.
 With features `gpt` and `tokio`, `AsyncFromGpt` provides async discovery.
 Assembly is synchronous; async callers can run it with `spawn_blocking`.
 `gpt` is enabled by default; `loop`
-(file-backed layers) and `tokio` are optional.
+(file-backed scutes) and `tokio` are optional.
 
 See the [crate documentation](carapace/README.md) for the full API, async
 cancellation contract, writable snapshot example, migration notes, and tests.

@@ -125,7 +125,7 @@ impl Fixture {
         File::open("/dev/urandom")?.read_exact(&mut nonce)?;
         let prefix = format!("carapace-bench-{}", std::process::id());
         let zero = Mapping::new(control, &format!("{prefix}-zero"), &Zero)?;
-        for layer in 0..depth {
+        for scute in 0..depth {
             let mut data = tempfile::tempfile()?;
             data.set_len(DATA_SIZE)?;
             let cow = attach(&data, false)?;
@@ -138,12 +138,12 @@ impl Fixture {
             });
             let mut mapping = Mapping::new(control, &format!("{prefix}-snapshot"), &snapshot)?;
             let output = mapping.open()?;
-            // Full chunks need no prior origin data. Each layer overwrites block zero
+            // Full chunks need no prior origin data. Each scute overwrites block zero
             // and adds disjoint blocks that must be inherited by the final stack.
-            let bytes = [u8::try_from(layer + 1)?; BLOCK as usize];
+            let bytes = [u8::try_from(scute + 1)?; BLOCK as usize];
             output.write_all_at(&bytes, 0)?;
             for block in 0..WRITES {
-                output.write_all_at(&bytes, (1 + layer * WRITES + block) as u64 * BLOCK)?;
+                output.write_all_at(&bytes, (1 + scute * WRITES + block) as u64 * BLOCK)?;
             }
             output.sync_all()?;
             control.suspend(mapping.id, true)?;
@@ -212,15 +212,15 @@ impl Fixture {
                 Err(error) => return Err(error.into()),
             }
         };
-        assert_eq!(chain.layers.len(), depth);
+        assert_eq!(chain.scutes.len(), depth);
         let file = chain.assemble()?;
         let mut bytes = [0; BLOCK as usize];
         file.read_exact_at(&mut bytes, 0)?;
         assert_eq!(bytes, [depth as u8; BLOCK as usize]);
-        for layer in 0..depth {
+        for scute in 0..depth {
             for block in 0..WRITES {
-                file.read_exact_at(&mut bytes, (1 + layer * WRITES + block) as u64 * BLOCK)?;
-                assert_eq!(bytes, [(layer + 1) as u8; BLOCK as usize]);
+                file.read_exact_at(&mut bytes, (1 + scute * WRITES + block) as u64 * BLOCK)?;
+                assert_eq!(bytes, [(scute + 1) as u8; BLOCK as usize]);
             }
         }
         file.read_exact_at(&mut bytes, (1 + depth * WRITES) as u64 * BLOCK)?;

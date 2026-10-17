@@ -33,7 +33,7 @@ by Cargo with `sudo <executable> --bench`. Criterion writes results under
 `carapace/target/criterion` (owned by root when run through Cargo). Add `-- --test` to the Cargo command for a
 single-iteration smoke test, including fixture validation at every depth.
 
-Two independent measurements cover 1, 2, 4, 8, 16, and 32 layers:
+Two independent measurements cover 1, 2, 4, 8, 16, and 32 scutes:
 
 - `block_device/discovery/N`: `Chain::from_gpt`, excluding destruction of the
   returned chain.
@@ -53,11 +53,11 @@ partitions on an already attached block device; Carapace's `loop` feature is not
 required. No filesystem formatter, cryptsetup, or other setup command is invoked.
 The temporary image needs about 162 MiB at maximum depth.
 
-Each layer has a 4 MiB COW partition and a 1 MiB hash partition. It overwrites one
+Each scute has a 4 MiB COW partition and a 1 MiB hash partition. It overwrites one
 shared 4 KiB block and writes 32 disjoint blocks. Full-chunk writes allow setup to
 use a zero origin for each store; the final assembled chain is checked for both
 inherited data and overwrites, plus an untouched zero block, before timing.
-This fixes exception count per layer and avoids filesystem-dependent workloads.
+This fixes exception count per scute and avoids filesystem-dependent workloads.
 Fixtures and loop attachment are outside timing. Caches are warmed by setup and
 validation; fresh activation means fresh device-mapper mappings, not cold storage.
 This measures host loop-backed block-device behavior, not physical-device or VM

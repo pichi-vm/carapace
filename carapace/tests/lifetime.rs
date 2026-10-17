@@ -25,19 +25,19 @@ fn available() -> bool {
     available
 }
 
-fn fixture(layers: usize) -> (tempfile::TempDir, AttachedImage, Chain) {
+fn fixture(scutes: usize) -> (tempfile::TempDir, AttachedImage, Chain) {
     let dir = tempfile::tempdir().unwrap();
-    let built = build_chain(&dir.path().join("image"), layers);
+    let built = build_chain(&dir.path().join("image"), scutes);
     let attached = AttachedImage::attach(&built.image);
     let chain = Chain::from_gpt(&decode_hex(&built.trusted_root_hex).unwrap()).unwrap();
     (dir, attached, chain)
 }
 
 // Explicit duplication is test setup, not an infallible public Clone contract.
-fn clone_layer(layer: &carapace::Layer) -> carapace::Layer {
-    carapace::Layer {
-        data: layer.data.try_clone().unwrap(),
-        hash: layer.hash.try_clone().unwrap(),
+fn clone_scute(scute: &carapace::Scute) -> carapace::Scute {
+    carapace::Scute {
+        data: scute.data.try_clone().unwrap(),
+        hash: scute.hash.try_clone().unwrap(),
     }
 }
 
@@ -92,13 +92,13 @@ fn overlapping_chains_share_lower_mappings() {
     }
     let (_dir, _attached, chain) = fixture(2);
     let mut parent_root = [0; 32];
-    chain.layers[1]
+    chain.scutes[1]
         .hash
         .read_exact_at(&mut parent_root, 88)
         .unwrap();
     let parent = Chain {
         root: parent_root.into(),
-        layers: chain.layers[..1].iter().map(clone_layer).collect(),
+        scutes: chain.scutes[..1].iter().map(clone_scute).collect(),
     };
     let lower = parent.assemble().unwrap();
     let upper = chain.assemble().unwrap();
@@ -132,9 +132,9 @@ fn concurrent_assembly_publishes_one_stack() {
         return;
     }
     let (_dir, _attached, mut chain) = fixture(2);
-    for layer in &mut chain.layers {
-        layer.data.seek(std::io::SeekFrom::Start(19)).unwrap();
-        layer.hash.seek(std::io::SeekFrom::Start(37)).unwrap();
+    for scute in &mut chain.scutes {
+        scute.data.seek(std::io::SeekFrom::Start(19)).unwrap();
+        scute.hash.seek(std::io::SeekFrom::Start(37)).unwrap();
     }
     let files = std::thread::scope(|scope| {
         let jobs: Vec<_> = (0..4)
@@ -147,9 +147,9 @@ fn concurrent_assembly_publishes_one_stack() {
     for file in &files {
         assert_eq!(node(file), node(&files[0]));
     }
-    for layer in &mut chain.layers {
-        assert_eq!(layer.data.stream_position().unwrap(), 19);
-        assert_eq!(layer.hash.stream_position().unwrap(), 37);
+    for scute in &mut chain.scutes {
+        assert_eq!(scute.data.stream_position().unwrap(), 19);
+        assert_eq!(scute.hash.stream_position().unwrap(), 37);
     }
     drop(files);
     torn_down();
@@ -157,7 +157,7 @@ fn concurrent_assembly_publishes_one_stack() {
 
 #[test]
 #[serial]
-fn failure_after_creating_a_lower_layer_cleans_up() {
+fn failure_after_creating_a_lower_scute_cleans_up() {
     if !available() {
         return;
     }
@@ -166,7 +166,7 @@ fn failure_after_creating_a_lower_layer_cleans_up() {
     // lookup, so lower mappings are created before the verified read fails.
     let mut wrong = Chain {
         root: chain.root.clone(),
-        layers: chain.layers.iter().map(clone_layer).collect(),
+        scutes: chain.scutes.iter().map(clone_scute).collect(),
     };
     wrong.root[0] ^= 1;
     assert!(wrong.assemble().is_err());
@@ -184,7 +184,7 @@ fn failure_after_creating_a_lower_layer_cleans_up() {
 #[cfg(feature = "loop")]
 #[test]
 #[serial]
-fn file_backed_layers_autoclear_on_last_close() {
+fn file_backed_scutes_autoclear_on_last_close() {
     if !available() {
         return;
     }
@@ -192,16 +192,16 @@ fn file_backed_layers_autoclear_on_last_close() {
     let data = dir.path().join("data");
     let hash = dir.path().join("hash");
     std::io::copy(
-        &mut &chain.layers[0].data,
+        &mut &chain.scutes[0].data,
         &mut File::create(&data).unwrap(),
     )
     .unwrap();
     std::io::copy(
-        &mut &chain.layers[0].hash,
+        &mut &chain.scutes[0].hash,
         &mut File::create(&hash).unwrap(),
     )
     .unwrap();
-    chain.layers[0] = carapace::Layer {
+    chain.scutes[0] = carapace::Scute {
         data: File::open(&data).unwrap(),
         hash: File::open(&hash).unwrap(),
     };
@@ -309,7 +309,7 @@ fn async_discovery_and_caller_managed_assembly() {
             .await
             .unwrap();
         assert_eq!(discovered.root, chain.root);
-        for (actual, expected) in discovered.layers.iter().zip(&chain.layers) {
+        for (actual, expected) in discovered.scutes.iter().zip(&chain.scutes) {
             assert_eq!(
                 DevId::try_from(actual.data.metadata().unwrap()).unwrap(),
                 DevId::try_from(expected.data.metadata().unwrap()).unwrap()

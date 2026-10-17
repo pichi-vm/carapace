@@ -223,7 +223,7 @@ fn rejects_chain_with_forged_zero_prefix_sentinel() {
 
     let _attached = AttachedImage::attach(&chain.image);
 
-    // from_gpt may succeed (the walker sees a truncated 1-layer chain)
+    // from_gpt may succeed (the walker sees a truncated 1-scute chain)
     // but assemble must fail when dm-verity detects the salt mismatch.
     let err = try_assemble(&chain.trusted_root_hex)
         .expect_err("expected failure due to forged sentinel / dm-verity hash mismatch");

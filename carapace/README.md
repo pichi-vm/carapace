@@ -1,23 +1,26 @@
 # carapace
 
-Carapace composes cryptographically linked block-device layers into one
-integrity-protected, read-only device. Each layer (a **scute**) contains a
+Carapace composes cryptographically linked block-device scutes into one
+integrity-protected, read-only device. Each **scute** contains a
 persistent dm-snapshot exception store and a dm-verity hash volume. The top
-layer's independently trusted root binds the entire chain.
+scute's independently trusted root binds the entire chain.
 
 This crate is the Linux read-side consumer. The format is specified in
 [SPEC.md](SPEC.md); image production lives elsewhere.
 
 ## Library API
 
-Discovery returns a `Chain`: an owned root and a list of `Layer { data, hash }`
-open files, ordered base to top. Callers can construct layers directly with
-`Layer { data: File::open(data_path)?, hash: File::open(hash_path)? }`.
+The public names `Scute` and `Chain::scutes` replace `Layer` and
+`Chain::layers`; update imports, field access, and struct literals accordingly.
+
+Discovery returns a `Chain`: an owned root and a list of `Scute { data, hash }`
+open files, ordered base to top. Callers can construct scutes directly with
+`Scute { data: File::open(data_path)?, hash: File::open(hash_path)? }`.
 Discovery retains the files it inspected; assembly independently rereads and
 validates their headers with positional I/O, preserving all input offsets.
 
-`Chain` and `Layer` implement `Debug`, but no longer implement `Clone`.
-They retain two file descriptors per layer until dropped, which can prolong
+`Chain` and `Scute` implement `Debug`, but no longer implement `Clone`.
+They retain two file descriptors per scute until dropped, which can prolong
 backing-device lifetimes. Open handles preserve input identity across pathname
 replacement; they do not make the contents immutable. Callers needing shared
 ownership can use `Arc<Chain>`; explicit `File::try_clone()` duplicates a handle
@@ -146,7 +149,7 @@ COW needs loop attachment first; lodown provides that separately.
 | Feature | Default | Purpose |
 |---|---|---|
 | `gpt` | On | `FromGpt` discovery through kernel-visible PARTUUIDs; CLI mounting |
-| `loop` | Off | Read-only, autoclearing loop attachment of regular-file layers |
+| `loop` | Off | Read-only, autoclearing loop attachment of regular-file scutes |
 | `tokio` | Off | `AsyncFromGpt` (also requires `gpt`) |
 
 The default build needs no async runtime. The library is empty on non-Linux
@@ -156,7 +159,7 @@ snapshot target, `devmap-verity` the standard header/target format, and optional
 lodown loop attachment. Carapace itself forbids unsafe Rust.
 
 Validation failures use `InvalidData`; invalid caller inputs use `InvalidInput`.
-Regular-file layers without `loop` return `Unsupported`. The shared verity
+Regular-file scutes without `loop` return `Unsupported`. The shared verity
 header decoder rejects noncanonical nonzero padding, which older Carapace
 versions accepted. Carapace additionally enforces its own parameter whitelist
 and chain rules, including for directly constructed chains.

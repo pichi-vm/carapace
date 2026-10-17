@@ -47,13 +47,13 @@ SCUTE_DATA_RAW="11dd804ae1bf4ab398c1f9f48ceedbf1"
 SCUTE_HASH_RAW="40bb957129724547b5806a8cb13fd7d1"
 BASE_FLAG_BIT=48
 
-# --- per-layer geometry ---
+# --- per-scute geometry ---
 # The production assembler sizes the top alias as
 # data_blocks * 4096 bytes (= DATA_BYTES). For ext4 mkfs at build time
 # to produce a filesystem that fits in the assembled device, the
 # writable snapshot's apparent size MUST equal DATA_BYTES / 512.
 DATA_BYTES=$((16*1024*1024))                  # 16 MiB data per scute
-LAYER_SECTORS=$((DATA_BYTES / 512))           # snapshot/zero apparent size, matches DATA
+SCUTE_SECTORS=$((DATA_BYTES / 512))           # snapshot/zero apparent size, matches DATA
 HASH_BYTES=$((4*1024*1024))                # 4 MiB hash tree (ample for 16 MiB data)
 GPT_ALIGN=2048                               # 1 MiB partition alignment
 
@@ -133,13 +133,13 @@ dm_create_ro() {
 }
 
 # Build the read-only carapace stack for scutes [0..upto-1]. Leaves the
-# top layer's mapper path in TOP_RO; if upto==0, TOP_RO=/dev/mapper/<zero>.
+# top scute's mapper path in TOP_RO; if upto==0, TOP_RO=/dev/mapper/<zero>.
 TOP_RO=""
 build_ro_stack() {
     local upto="$1"
     local j
     # dm-zero
-    dm_create "z" "0 $LAYER_SECTORS zero"
+    dm_create "z" "0 $SCUTE_SECTORS zero"
     TOP_RO="/dev/mapper/$PREFIX-z"
     for ((j=0; j<upto; j++)); do
         local data_loop="${DATA_LOOPS[$j]}"
@@ -157,7 +157,7 @@ build_ro_stack() {
         # via the writable side.
         local origin="$TOP_RO"
         local cow="/dev/mapper/$PREFIX-v$j"
-        dm_create "s$j" "0 $LAYER_SECTORS snapshot $origin $cow P 8"
+        dm_create "s$j" "0 $SCUTE_SECTORS snapshot $origin $cow P 8"
         TOP_RO="/dev/mapper/$PREFIX-s$j"
     done
 }
@@ -185,7 +185,7 @@ for ((i=0; i<N; i++)); do
     HASH_FILES[i]="$hf"
 done
 
-echo "[fixture] building $N scutes (layer=$LAYER_SECTORS sectors, data=$DATA_BYTES B)" >&2
+echo "[fixture] building $N scutes (scute=$SCUTE_SECTORS sectors, data=$DATA_BYTES B)" >&2
 
 # --- 2. build each scute bottom-up ---
 MNT="$WORK/mnt"
@@ -200,11 +200,11 @@ for ((i=0; i<N; i++)); do
     # 2b. assemble the read-only stack of the chain so far [0..i-1]
     build_ro_stack "$i"
 
-    # 2c. layer a writable snapshot on top whose CoW is this scute's data file
-    dm_create "w" "0 $LAYER_SECTORS snapshot $TOP_RO $data_loop P 8"
+    # 2c. stack a writable snapshot on top whose CoW is this scute's data file
+    dm_create "w" "0 $SCUTE_SECTORS snapshot $TOP_RO $data_loop P 8"
     snap_w="/dev/mapper/$PREFIX-w"
 
-    # 2d. populate the layer
+    # 2d. populate the scute
     if [ "$i" -eq 0 ]; then
         # Base: lay down a minimal ext4
         # Force 4096-byte block size: at read time the chain is exposed
@@ -218,7 +218,7 @@ for ((i=0; i<N; i++)); do
     # Per-scute content
     echo "scute$i content" > "$MNT/scute$i.txt"
     if [ "$i" -gt 0 ]; then
-        # Modify a file from a lower scute so we can verify cross-layer
+        # Modify a file from a lower scute so we can verify cross-scute
         # composition later.
         echo "modified by scute$i" > "$MNT/scute0.txt"
     fi
