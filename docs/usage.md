@@ -53,6 +53,10 @@ The file supports ordinary reads, seeks, metadata, and FD-based consumers.
 `DevId::try_from(device.metadata()?)` obtains its device number without closing
 it. Import `Assemble` to call the synchronous `assemble` trait method.
 
+The library imposes no maximum number of scutes. Discovery still rejects
+cycles, and assembly requires at least one scute. Resource limits are the
+caller’s policy; operating-system resource constraints still apply.
+
 ## Async API
 
 With `gpt` and `tokio`, `AsyncFromGpt` provides discovery through Tokio's

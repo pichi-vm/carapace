@@ -50,7 +50,8 @@ pub struct Scute {
 
 /// An ordered chain of scutes, base → top, plus the operator-supplied
 /// trusted root hash. Produced by `FromGpt::from_gpt` or constructed
-/// directly from caller-opened files. Inputs remain open until the chain is
+/// directly from caller-opened files. The library imposes no chain-depth limit.
+/// Inputs remain open until the chain is
 /// dropped. Assembly rereads their headers using positional I/O; it neither
 /// trusts discovery-time validation nor changes the input file offsets.
 #[derive(Debug)]

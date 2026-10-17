@@ -11,7 +11,7 @@
 //! bottom-up, so this matches the consumer's natural iteration.
 //!
 //! Partition opening is delegated to the [`ChainResolver`] trait so the
-//! decision logic (cycle / depth / sentinel / salt-too-short) is
+//! decision logic (cycle / sentinel / salt-too-short) is
 //! unit-testable with temporary files, without sysfs or block devices.
 
 use crate::partition::ChainResolver;
@@ -21,9 +21,6 @@ use crate::Scute;
 use std::collections::HashSet;
 use std::io;
 use std::os::unix::fs::FileExt;
-
-/// Hard cap on chain depth.
-use crate::assemble::MAX_CHAIN_DEPTH;
 
 /// Walk the chain starting at `trusted_root` backward via salt prefixes,
 /// returning an ordered list of open scutes in BASE → TOP
@@ -55,16 +52,6 @@ pub(crate) fn walk_chain(
     let mut chain_algo: Option<Algorithm> = None;
 
     loop {
-        if scutes_top_down.len() >= MAX_CHAIN_DEPTH {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "chain walk failed: exceeded MAX_CHAIN_DEPTH ({MAX_CHAIN_DEPTH}) at depth {}",
-                    scutes_top_down.len()
-                ),
-            ));
-        }
-
         let data_partuuid: [u8; 16] = current_root[..16].try_into().unwrap();
         let hash_partuuid: [u8; 16] = current_root[16..32].try_into().unwrap();
 
@@ -394,27 +381,41 @@ mod tests {
     }
 
     #[test]
-    fn rejects_chain_exceeding_max_depth() {
+    fn walks_chains_longer_than_32_scutes_and_rejects_cycles() {
         let mut resolver = MockResolver::default();
-        for i in 0..MAX_CHAIN_DEPTH as u8 {
+        for i in 0..64u8 {
             let data = [i; 16];
             let hash = [0x80 + i; 16];
             let mut salt = [0u8; 32];
-            salt[..16].fill(i + 1);
-            salt[16..32].fill(0x80 + i + 1);
+            if i < 63 {
+                salt[..16].fill(i + 1);
+                salt[16..32].fill(0x80 + i + 1);
+            }
             resolver = resolver
                 .with_data(data)
                 .with_hash(hash, &synth_sb(32, &salt));
         }
-        let mut root = [0u8; 32];
-        root[..16].fill(0);
-        root[16..32].fill(0x80);
-        let e = walk_chain(&root, &resolver).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            e.to_string().contains("MAX_CHAIN_DEPTH"),
-            "expected depth-limit error, got: {e}"
-        );
+        let root = root_from(0, 0x80);
+        let scutes = walk_chain(&root, &resolver).unwrap();
+        assert_eq!(scutes.len(), 64);
+        for (index, scute) in scutes.iter().enumerate() {
+            let mut salt = [0u8; 32];
+            scute.hash.read_exact_at(&mut salt, 88).unwrap();
+            let expected = if index == 0 {
+                [0; 32]
+            } else {
+                root_from((64 - index) as u8, (0xc0 - index) as u8)
+            };
+            assert_eq!(salt, expected);
+        }
+
+        // Turn the base into a link back to the top after the long walk.
+        resolver.hashes[&[0xbf; 16]]
+            .write_all_at(&root, 88)
+            .unwrap();
+        let error = walk_chain(&root, &resolver).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("cycle"), "{error}");
     }
 
     #[test]

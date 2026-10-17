@@ -21,7 +21,6 @@ use std::os::unix::fs::{FileExt, FileTypeExt};
 
 /// Preserve the existing 64 GiB virtual origin size during the API migration.
 const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;
-pub(crate) const MAX_CHAIN_DEPTH: usize = 32;
 
 #[derive(Debug)]
 struct PreparedScute<'a> {
@@ -48,10 +47,10 @@ impl<'a> PreparedScute<'a> {
 impl Chain {
     /// Independently validate the retained inputs before creating mappings.
     fn prepare(&self) -> io::Result<Vec<PreparedScute<'_>>> {
-        if self.scutes.is_empty() || self.scutes.len() > MAX_CHAIN_DEPTH {
+        if self.scutes.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("a chain needs 1..={MAX_CHAIN_DEPTH} scutes"),
+                "a chain needs at least one scute",
             ));
         }
         let mut root = self.root.clone();
@@ -627,8 +626,8 @@ mod tests {
     }
 
     #[test]
-    fn direct_chains_reject_empty_and_excessive_depth_before_io() {
-        let mut chain = Chain {
+    fn direct_chains_reject_empty_before_io() {
+        let chain = Chain {
             root: vec![1; 32].into(),
             scutes: vec![],
         };
@@ -636,16 +635,22 @@ mod tests {
             chain.prepare().unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
-        chain.scutes = (0..=MAX_CHAIN_DEPTH)
-            .map(|_| Scute {
-                data: File::open("/dev/null").unwrap(),
-                hash: File::open("/dev/null").unwrap(),
-            })
-            .collect();
-        assert_eq!(
-            chain.prepare().unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
+    }
+
+    #[test]
+    fn prepares_chains_longer_than_32_scutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = Chain {
+            root: vec![64; 32].into(),
+            scutes: (0..64)
+                .map(|i| scute(dir.path(), i, "sha256", &[i as u8; 32]))
+                .collect(),
+        };
+        let prepared = chain.prepare().unwrap();
+        assert_eq!(prepared.len(), 64);
+        for (i, scute) in prepared.iter().enumerate() {
+            assert_eq!(&*scute.root, &[(i + 1) as u8; 32]);
+        }
     }
 
     #[test]
