@@ -3,7 +3,7 @@
 
 //! dm-snapshot persistent on-disk header parser. Read through the
 //! activated dm-verity device — never directly from the data partition,
-//! per spec §279.
+//! per the specification’s “Consumer Verification and Setup” section.
 //!
 //! Per kernel `drivers/md/dm-snap-persistent.c` (and the v1.0 spec
 //! reference), the header is the first 16 bytes of the data file:
@@ -19,7 +19,7 @@ pub(crate) const SNAPSHOT_MAGIC: u32 = 0x7041_6e53;
 pub(crate) const SNAPSHOT_HEADER_SIZE: usize = 16;
 const SNAPSHOT_VALID: u32 = 1;
 const SNAPSHOT_VERSION: u32 = 1;
-/// Spec §136 (Parameter Whitelist) + §281: chunk_size MUST equal 8
+/// The specification’s Parameter Whitelist requires chunk_size to equal 8
 /// (sectors; equivalent to 4096 bytes).
 const RDP_CHUNK_SIZE: u32 = 8;
 
@@ -84,7 +84,7 @@ impl ValidatedSnapshotHeader {
         let chunk_size = raw.chunk_size.get();
         if chunk_size != RDP_CHUNK_SIZE {
             return Err(invalid(format!(
-                "chunk_size = {chunk_size}, expected {RDP_CHUNK_SIZE} (spec RDP §136)"
+                "chunk_size = {chunk_size}, expected {RDP_CHUNK_SIZE} (spec Parameter Whitelist)"
             )));
         }
         Ok(Self { chunk_size })

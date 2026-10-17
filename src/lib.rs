@@ -9,7 +9,7 @@
 //! chain root, this library walks the partitions the kernel exposes via
 //! `/sys/class/block/*/uevent` (PARTUUID lookup), validates every scute's
 //! parameters against the RDP whitelist, and builds the dm-verity +
-//! dm-snapshot stack. The on-disk format is specified in `SPEC.md`; this
+//! dm-snapshot stack. The on-disk format is specified in `docs/spec.md`; this
 //! crate is read-only at the operator surface.
 //!
 //! # Library API

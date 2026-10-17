@@ -1,22 +1,59 @@
-[workspace]
-resolver = "2"
-members = ["carapace"]
-
-[workspace.package]
+[package]
+name = "carapace"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
 publish = false
 repository = "https://github.com/pichi-vm/carapace"
+description = "Assemble carapace block-device chains into a read-only device."
 
-# Single-crate workspace (carapace); these shared entries feed the crate's
-# `{ workspace = true }` deps.
-[workspace.dependencies]
+[[bin]]
+name = "carapace"
+path = "src/main.rs"
+
+[features]
+default = ["gpt"]
+# GPT/PARTUUID discovery: `Chain::from_gpt` scans block-device PARTUUIDs.
+gpt = []
+# File-backed scutes: loop-attach `data`/`hash` files via lodown.
+loop = ["dep:lodown"]
+# Async discovery adapter (with gpt); the default build needs no runtime.
+tokio = ["dep:tokio"]
+
+# carapace is Linux-only: the whole library and CLI drive device-mapper. Gate
+# the deps to Linux too, so a consumer that pulls the lib on another target
+# resolves it to an empty crate instead of compiling the Linux-only ioctl
+# stack.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Device control, snapshot/zero targets, and the shared verity format.
+# No userspace hashing required. Git dependencies are pinned to revisions.
+devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+# Safe loop-device wrapper for file-backed scutes (feature `loop`).
+lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+# zerocopy for snapshot header parsing.
 zerocopy = { version = "0.8", features = ["derive"] }
-tempfile = "3"
 
-[workspace.lints.rust]
+[dev-dependencies]
+criterion = "0.5.1"
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72", features = ["sha2"] }
+gpt = "4"
+lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9" }
+serial_test = { version = "3", default-features = false }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "fs", "io-util"] }
+uuid = "1"
+
+[[bench]]
+name = "block_device"
+harness = false
+required-features = ["gpt"]
+
+[lints.rust]
 # All unsafe now lives in the devmap/lodown substrate crates; carapace is
 # unsafe-free.
 unsafe_code = "forbid"
@@ -24,7 +61,7 @@ missing_debug_implementations = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
 
-[workspace.lints.clippy]
+[lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"

@@ -97,7 +97,7 @@ The numbered steps trace the assembly algorithm. The tool works from the bottom 
 
 `dm-snapshot₂` now contains the trusted read-only filesystem — this is the composed carapace.
 
-The only input from outside the carapace is `root₂`. Every other root value is read from the salt prefix of the hash file one scute above. Scute 0 is the base: its salt is entirely builder-defined (conventionally random bytes) with no prefix constraint, and its snapshot's origin is `dm-zero`. If at any step `dm-verityᵢ` refuses to activate with the supplied root — because the hash tree in `hashᵢ` does not hash to the expected value — assembly fails and no dm-snapshot is produced.
+The only input from outside the carapace is `root₂`. Every other root value is read from the salt prefix of the hash file one scute above. Scute 0 is the base: its salt begins with a required zero prefix followed by an optional builder-defined suffix, and its snapshot's origin is `dm-zero`. If at any step `dm-verityᵢ` refuses to activate with the supplied root — because the hash tree in `hashᵢ` does not hash to the expected value — assembly fails and no dm-snapshot is produced.
 
 ## On-Disk Format (Normative)
 
@@ -375,24 +375,6 @@ The trust properties stated in [Threat Model](#threat-model) are preserved witho
 
 This is an implementation choice, not a requirement. The on-disk format the kernel consumes (see [On-Disk Format](#on-disk-format-normative)) is unchanged either way; only what crosses the wire between builder and consumer is at issue.
 
-### systemd Integration
-
-The GPT deployment pattern is deliberately shaped to compose with systemd's existing storage machinery, so a carapace root can boot on stock systemd with a single dedicated assembler and no changes to the rest of the boot path.
-
-**Command line.** The trust anchor is delivered as `carapacehash=<rootₙ₋₁-hex>`, parallel to systemd's `roothash=`/`usrhash=`, gated by `systemd.carapace=` / `rd.systemd.carapace=` (default on). The root mount contract is `root=/dev/mapper/root`: the assembler produces that device and everything above it is stock systemd.
-
-**A dedicated assembler, not `systemd-veritysetup`.** A carapace is a salt-chained *stack* of dm-snapshot(cow)+dm-verity scutes, not the single data+hash pair `systemd-veritysetup-generator` handles. Integration therefore takes the form of a peer generator (mirroring `systemd-veritysetup-generator`): it reads `carapacehash=` and emits a unit, ordered `Before=initrd-root-device.target`, that walks the chain and assembles `/dev/mapper/root`. `carapacehash=` deliberately does *not* reuse `roothash=`, so the two generators never contend for the same root.
-
-**The assembler owns `/dev/mapper/<name>`, not udev.** The stack comes up in the initramfs *before* `systemd-udevd`, and each scute is a raw `/dev/mapper/control` ioctl that carries no udev synchronization cookie. The assembler therefore creates the operator-visible `/dev/mapper/<name>` symlink (→ the kernel-synchronous `/dev/dm-<minor>`) itself rather than waiting for udev to catch up. On the top alias's resume it sets the udev *primary-source* flag in the ioctl cookie (`event_nr`), so when `systemd-udevd` later coldplugs the device its DM rules recognize the activation as authoritative — creating the systemd `dev-mapper-<name>.device` alias and leaving the symlink in place instead of tearing it down. The two mechanisms are complementary: the symlink guarantees the path exists the instant `attach` returns; the cookie keeps udev cooperative once it starts.
-
-**PARTUUID discovery matches the DPS.** The [PARTUUID Assignment](#partuuid-assignment) rule — data ← `root[0..16]`, hash ← `root[16..32]` — is the same encoding the Discoverable Partitions Specification uses for verity (data partition ← first 128 bits of the root hash, verity partition ← the last 128 bits). The scute type GUIDs ([Partition Types](#partition-types)) are carapace-defined; registering them with the DPS is the natural path to first-class recognition. They are intentionally arch-neutral: one carapace is one image, so arch-based root selection (the reason the DPS verity types are per-architecture) does not apply.
-
-**Device identity derives from the root, not the superblock.** A consumer that exposes an operator- or guest-visible device identity (a `/dev/disk/by-id/dm-uuid-*` link, a device-mapper uuid) MUST derive it from the trusted `rootᵢ`, never from the superblock `uuid` (which is adversary-controllable — see [Why the superblock `uuid` carries no trust](#why-the-superblock-uuid-carries-no-trust)). carapace leaves device uuids unset, relying on the name contract (`root=/dev/mapper/root`) and the verity-covered filesystem uuid.
-
-**Filesystem vs. inner GPT is content-probed, not signalled.** Once `/dev/mapper/root` exists, what it contains is determined exactly as systemd already determines it for any root device (see `systemd-dissect`): a bare filesystem is mounted directly; a device carrying a GPT is dissected and its inner root/`usr`/… discovered by DPS type GUID (`systemd-gpt-auto`). No additional command-line signal is needed — `carapacehash=` conveys only the chain anchor; the inner shape is systemd's normal determination.
-
-**Integrity covers the whole assembled device.** Unlike systemd's outer `roothash=`, where verity protects the contents of a partition, a carapace's chain integrity-protects the *entire* assembled block device. An inner GPT's partitions therefore need not carry their own verity — `rootₙ₋₁` already covers everything inside `/dev/mapper/root`. This keeps the model a single trust anchor rather than nested verity domains.
-
 ## Design Rationale
 
 ### Trust versus discovery
@@ -428,11 +410,11 @@ A carapace is a single stacked block device, and its hash-tree and block-geometr
 
 ### Why chain parameters are checked against a whitelist rather than a blocklist
 
-A blocklist permits any value not yet known to be unsafe; that is the wrong default for a security-critical primitive. New attacks and weakened algorithms appear faster than fielded consumers can be patched, so a blocklist trails real risk by months. A whitelist inverts the asymmetry: a chain's parameter envelope is exactly the set the consumer has explicitly reviewed, and unfamiliar values fail closed. The cost is that adding a new algorithm requires bumping the spec version and rolling out updated consumers — but the spec already requires consumers to read every historical version, so the rollout is amortized over the same upgrade cadence consumers already follow.
+A blocklist permits any value not yet known to be unsafe; that is the wrong default for a security-critical primitive. New attacks and weakened algorithms appear faster than fielded consumers can be patched, so a blocklist trails real risk by months. A whitelist inverts the asymmetry: a chain's parameter envelope is exactly the set the consumer has explicitly reviewed, and unfamiliar values fail closed. The cost is that adding a new algorithm requires bumping the spec version and rolling out updated consumers.
 
 ### Why the salt has a required prefix and an optional suffix
 
-For non-base scutes, the prefix carries the chain's trust binding: it is the parent's root hash, which the consumer validates. The suffix is builder-defined and opaque to the consumer. Setting the suffix to empty yields deterministic scute identity — same content plus same parent plus same parameters produces the same `rootᵢ` — which enables content-addressed caching, reproducible builds, and cross-builder dedup. Builders who want to distinguish otherwise-identical scutes (different instances, provenance markers) use a non-empty suffix. Trust properties depend only on the prefix; the suffix affects `rootᵢ` but plays no role in the consumer's trust check beyond whatever cascade effect it has on subsequent chain values. The base scute has no prefix constraint — its whole salt is builder-defined, typically random — and contributes only its resulting `root₀` to the chain.
+For non-base scutes, the prefix carries the chain's trust binding: it is the parent's root hash, which the consumer validates. The suffix is builder-defined and opaque to the consumer. Setting the suffix to empty yields deterministic scute identity — same content plus same parent plus same parameters produces the same `rootᵢ` — which enables content-addressed caching, reproducible builds, and cross-builder dedup. Builders who want to distinguish otherwise-identical scutes (different instances, provenance markers) use a non-empty suffix. Trust properties depend only on the prefix; the suffix affects `rootᵢ` but plays no role in the consumer's trust check beyond whatever cascade effect it has on subsequent chain values. The base scute uses a zero prefix to mark the absence of a parent. Its optional suffix is builder-defined, typically random; the full salt contributes to `root₀`.
 
 ### Why `ZERO_COUNT` is a specification constant
 

@@ -6,7 +6,7 @@
 //!
 //! No `Default` impl — an unknown algorithm string is always
 //! `io::ErrorKind::InvalidData`, never a silent fallback
-//! (PITFALLS CRITICAL-7 prevention).
+//! under the specification’s Parameter Whitelist.
 
 use std::io;
 

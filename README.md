@@ -5,9 +5,9 @@ A cryptographically composed, read-only block-device layering mechanism.
 A **scute** is one layer (a dm-snapshot COW + a dm-verity tree); a **carapace**
 is a salt-chain-bound stack of scutes presented as a single integrity-protected
 read-only block device, validated by one trust anchor: the top scute's verity
-root. See the [format specification](carapace/SPEC.md).
+root. See the [format specification](docs/spec.md).
 
-The workspace contains the `carapace` library and CLI. It uses the external
+This package contains the `carapace` library and CLI. It uses the external
 `devmap-core`, `devmap-linux`, `devmap-snapshot`, `devmap-verity`, and
 optional `lodown` crates.
 
@@ -36,8 +36,8 @@ Assembly is synchronous; async callers can run it with `spawn_blocking`.
 `gpt` is enabled by default; `loop`
 (file-backed scutes) and `tokio` are optional.
 
-See the [crate documentation](carapace/README.md) for the full API, async
-cancellation contract, writable snapshot example, migration notes, and tests.
+See the [usage guide](docs/usage.md) for the full API, async
+cancellation contract, writable snapshot example, and tests.
 
 ## CLI
 

@@ -6,12 +6,9 @@ persistent dm-snapshot exception store and a dm-verity hash volume. The top
 scute's independently trusted root binds the entire chain.
 
 This crate is the Linux read-side consumer. The format is specified in
-[SPEC.md](SPEC.md); image production lives elsewhere.
+[spec.md](spec.md); image production lives elsewhere.
 
 ## Library API
-
-The public names `Scute` and `Chain::scutes` replace `Layer` and
-`Chain::layers`; update imports, field access, and struct literals accordingly.
 
 Discovery returns a `Chain`: an owned root and a list of `Scute { data, hash }`
 open files, ordered base to top. Callers can construct scutes directly with
@@ -19,7 +16,7 @@ open files, ordered base to top. Callers can construct scutes directly with
 Discovery retains the files it inspected; assembly independently rereads and
 validates their headers with positional I/O, preserving all input offsets.
 
-`Chain` and `Scute` implement `Debug`, but no longer implement `Clone`.
+`Chain` and `Scute` implement `Debug`; duplicating their file handles is explicit.
 They retain two file descriptors per scute until dropped, which can prolong
 backing-device lifetimes. Open handles preserve input identity across pathname
 replacement; they do not make the contents immutable. Callers needing shared
@@ -54,8 +51,7 @@ tear down the stack. Dropping a file does not forcibly unmount anything.
 
 The file supports ordinary reads, seeks, metadata, and FD-based consumers.
 `DevId::try_from(device.metadata()?)` obtains its device number without closing
-it. `Removed` is no longer exported, and `assemble` is now a trait method:
-synchronous callers import `Assemble`.
+it. Import `Assemble` to call the synchronous `assemble` trait method.
 
 ## Async API
 
@@ -75,7 +71,7 @@ async fn attach(root: &[u8]) -> std::io::Result<std::fs::File> {
 
 The closure owns the chain and returns the same device file without reopening
 it. Callers wanting Tokio file I/O can wrap it with `tokio::fs::File::from_std`
-using Tokio's `fs` feature. `AsyncAssemble` is no longer exported.
+using Tokio's `fs` feature.
 
 Dropping a Tokio blocking task's join handle does not stop work that has
 started; runtime shutdown may wait for it to finish.
@@ -185,20 +181,8 @@ it does not require udev. Mounting requires device-mapper privileges and
 
 ## Building and testing
 
-```sh
-cargo build --release
-cargo test --lib --bins
-cargo test --no-default-features --lib --bins
-cargo test --all-features --lib --bins
-sudo cargo test --all-features --tests -- --test-threads=1
-```
-
-Kernel integration tests require loop devices, dm-zero, dm-verity,
-dm-snapshot, mount privileges, `cryptsetup-bin`, `gdisk`, `dmsetup`,
-`e2fsprogs`, and `python3`. Run them on an isolated test host: fixture cleanup
-uses the `CARAPACE-*` device namespace. They verify composition, tampering,
-file lifetimes, shared mappings, caller-managed async assembly, and writable
-snapshots.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for prerequisites, checks,
+integration tests, and benchmarks.
 
 ## License
 

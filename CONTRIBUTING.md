@@ -15,6 +15,46 @@ gitlint (see `.gitlint`) in CI.
   produced. Do not reference internal process, prior iterations, or review
   back-and-forth. (gitlint cannot check this — it is a review responsibility.)
 
+## Development checks
+
+This repository is one Rust package containing a library and CLI. Run commands
+from the repository root. `Cargo.lock` is tracked; use `--locked` for reproducible
+checks and update the lockfile deliberately when changing dependencies.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --lib --bins
+cargo test --locked --no-default-features --lib --bins
+cargo test --locked --all-features --lib --bins
+cargo check --locked --no-default-features --all-targets
+cargo +1.89.0 check --locked --all-features --lib --bins
+cargo doc --locked --all-features --no-deps
+bash ci/grep-unsafe.sh
+```
+
+CI also exercises every combination of the `gpt`, `loop`, and `tokio` features,
+checks dependency policy with cargo-deny, and checks SPDX headers with Hawkeye.
+
+## Integration tests
+
+Kernel integration tests require Linux, root, loop devices, device-mapper,
+mount privileges, the `zero`, `snapshot`, and `verity` targets, and `cryptsetup`,
+`sgdisk`, `dmsetup`, `e2fsprogs`, and `python3`. On Ubuntu, the package names are
+`cryptsetup-bin gdisk dmsetup e2fsprogs python3`.
+
+On an x86-64 Linux host, build as your normal user and run tests as root:
+
+```sh
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -n' \
+  cargo test --locked --target x86_64-unknown-linux-gnu --all-features --tests -- --test-threads=1
+```
+
+Replace the target and runner variable for another architecture. Run on an
+isolated test host without other Carapace users: fixtures use the `CARAPACE-*`
+device namespace. The tests cover mounts, tampering, file lifetimes, shared
+mappings, async callers, and writable snapshots.
+
 ## Block-device benchmarks
 
 The Criterion benchmark requires Linux, root/device-mapper access, loop devices,
@@ -23,14 +63,14 @@ It fails if these are unavailable. On an x86-64 Linux host, run:
 
 ```sh
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -n' \
-  cargo bench --target x86_64-unknown-linux-gnu --bench block_device
+  cargo bench --locked --target x86_64-unknown-linux-gnu --bench block_device
 ```
 
 This builds as your normal user and runs only the benchmark executable as root.
 Replace the target and runner variable for another architecture. Alternatively,
-use `cargo bench --bench block_device --no-run`, then run the executable printed
-by Cargo with `sudo <executable> --bench`. Criterion writes results under
-`carapace/target/criterion` (owned by root when run through Cargo). Add `-- --test` to the Cargo command for a
+use `cargo bench --locked --bench block_device --no-run`, then run the executable
+printed by Cargo with `sudo <executable> --bench`. Criterion writes results under
+`target/criterion` (owned by root when run through Cargo). Add `-- --test` for a
 single-iteration smoke test, including fixture validation at every depth.
 
 Two independent measurements cover 1, 2, 4, 8, 16, and 32 scutes:

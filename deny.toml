@@ -20,7 +20,7 @@ ignore = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# Workspace-internal path deps carry no version; don't flag them as wildcards.
+# Substrate Git dependencies are pinned by revision rather than version.
 allow-wildcard-paths = true
 
 [sources]
