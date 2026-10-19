@@ -59,7 +59,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --all-features
-      # Defense-in-depth for the library's forbid(unsafe_code).
+      # Enforce the single private Windows unsafe exception.
       - run: bash ci/grep-unsafe.sh
 
   msrv:
@@ -89,8 +89,8 @@ jobs:
           cargo test --locked --no-default-features --features loop --lib --bins
           cargo test --locked --no-default-features --features tokio --lib --bins
           cargo test --locked --no-default-features --features loop,tokio --lib --bins
-          cargo test --locked --no-default-features --features rustix --lib --bins
-          cargo test --locked --no-default-features --features rustix,tokio --lib --bins
+          cargo test --locked --no-default-features --features image --lib --bins
+          cargo test --locked --no-default-features --features image,tokio --lib --bins
           cargo test --locked --features tokio --lib --bins
           cargo test --locked --features loop --lib --bins
           cargo test --locked --all-features --lib --bins
@@ -113,3 +113,24 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n
         run: cargo bench --locked --target x86_64-unknown-linux-gnu --bench block_device -- --test
+
+  portable:
+    name: portable image conversion (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-features --all-targets
+      - run: cargo test --locked --no-default-features --features image --lib --bins
+      - run: cargo test --locked --all-features --lib --bins
+      - run: cargo clippy --locked --all-features --all-targets -- -D warnings
+      - run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

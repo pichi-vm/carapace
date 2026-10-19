@@ -5,8 +5,8 @@ integrity-protected, read-only device. Each **scute** contains a
 persistent dm-snapshot exception store and a dm-verity hash volume. The top
 scute's independently trusted root binds the entire chain.
 
-This crate is the Linux read-side consumer. The format is specified in
-[spec.md](spec.md); image production lives elsewhere.
+Discovery and assembly require Linux. Optional image conversion supports Linux,
+macOS, and Windows. The format is specified in [spec.md](spec.md).
 
 ## Library API
 
@@ -144,19 +144,40 @@ Keep the input files alive through setup. The returned writable file retains
 the snapshot, which in turn retains the origin and COW device. A regular-file
 COW needs loop attachment first; lodown provides that separately.
 
+## Image conversion
+
+Enable `image` to convert a raw image into a base-scute COW stream:
+
+```rust,no_run
+use carapace::image::{Plan, Planned};
+use std::{fs::File, io};
+
+let mut scute = Planned::<File>::plan(File::open("disk.raw")?)?;
+let size = scute.size(); // Exact output length, including padding.
+io::copy(&mut scute, &mut File::create("base.cow")?)?;
+# Ok::<(), io::Error>(())
+```
+
+The source must be a nonempty regular file of at most 64 GiB. Keep its contents
+unchanged and do not use duplicated handles during planning or reading.
+Planning scans for nonzero chunks, skipping sparse holes where supported;
+streaming rereads the selected chunks. With `tokio`, use `AsyncPlan` with a
+`tokio::fs::File` and consume the result through `AsyncRead`.
+
 ## Features and dependencies
 
 | Feature | Default | Purpose |
 |---|---|---|
 | `gpt` | On | `FromGpt` discovery through kernel-visible PARTUUIDs; CLI mounting |
 | `loop` | Off | Read-only, autoclearing loop attachment of regular-file scutes |
-| `tokio` | Off | `AsyncFromGpt` (also requires `gpt`) |
+| `image` | Off | Portable image-to-base-scute conversion |
+| `tokio` | Off | Async discovery with `gpt`; async conversion with `image` |
 
-The default build needs no async runtime. The library is empty on non-Linux
-targets. Rust 1.89 or newer is required. `devmap-linux` handles device control (and exports `DevId`),
+The default build needs no async runtime. Rust 1.89 or newer is required.
+`devmap-linux` handles device control (and exports `DevId`),
 `devmap-core` shared geometry types (spans, block sizes), `devmap-snapshot` the
 snapshot target, `devmap-verity` the standard header/target format, and optional
-lodown loop attachment. Carapace itself forbids unsafe Rust.
+lodown loop attachment.
 
 Validation failures use `InvalidData`; invalid caller inputs use `InvalidInput`.
 Regular-file scutes without `loop` return `Unsupported`. The shared verity

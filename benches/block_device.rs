@@ -1,17 +1,24 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_os = "linux")]
 mod support;
 
+#[cfg(target_os = "linux")]
 use carapace::{Assemble, Chain, FromGpt};
+#[cfg(target_os = "linux")]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode};
+#[cfg(target_os = "linux")]
 use devmap_linux::Control;
+#[cfg(target_os = "linux")]
 use std::{
     hint::black_box,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "linux")]
 use support::{wait_empty, Fixture};
 
+#[cfg(target_os = "linux")]
 fn benchmark(criterion: &mut Criterion) {
     let control = Control::open().expect("benchmarks require root and device-mapper access");
     for target in ["zero", "snapshot", "verity"] {
@@ -62,5 +69,10 @@ fn benchmark(criterion: &mut Criterion) {
         group.finish();
     }
 }
+#[cfg(target_os = "linux")]
 criterion_group!(benches, benchmark);
+#[cfg(target_os = "linux")]
 criterion_main!(benches);
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

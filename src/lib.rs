@@ -10,40 +10,50 @@
 //! `/sys/class/block/*/uevent` (PARTUUID lookup), validates every scute's
 //! parameters against the RDP whitelist, and builds the dm-verity +
 //! dm-snapshot stack. The on-disk format is specified in `docs/spec.md`; this
-//! CLI is read-only; the optional `rustix` feature adds userspace conversion.
+//! CLI is read-only; the optional `image` feature adds userspace conversion.
+//!
+//! Image conversion is portable across Linux, macOS, and Windows. Discovery,
+//! assembly, and the CLI require Linux.
 //!
 //! # Library API
 //!
-//! - [`Chain`] — an ordered list of scutes (base → top) plus a trusted root.
-//! - [`Scute`] — open data/hash files for one scute.
-//! - [`Assemble::assemble`] — build the dm stack and return a [`std::fs::File`].
+//! - `Chain` — an ordered list of scutes (base → top) plus a trusted root.
+//! - `Scute` — open data/hash files for one scute.
+//! - `Assemble::assemble` — build the dm stack and return a [`std::fs::File`].
 //! - `FromGpt` — discover a `Chain` by PARTUUID walk (feature `gpt`).
 //! - `AsyncFromGpt` — Tokio discovery (features `gpt` + `tokio`).
 //! - `image::Plan` / `image::AsyncPlan` — planned base-scute readers
-//!   (feature `rustix`, plus `tokio` for asynchronous conversion).
+//!   (feature `image`, plus `tokio` for asynchronous conversion).
 //!
-//! Re-export: [`DevId`].
+//! Linux-only re-export: `DevId`.
 
-#![forbid(unsafe_code)]
-#![cfg(target_os = "linux")]
+#![deny(unsafe_code)]
 
+#[cfg(target_os = "linux")]
 mod assemble;
-#[cfg(feature = "gpt")]
+#[cfg(all(target_os = "linux", feature = "gpt"))]
 mod chain;
-#[cfg(feature = "rustix")]
+#[cfg(feature = "image")]
 pub mod image;
-#[cfg(feature = "gpt")]
+#[cfg(all(target_os = "linux", feature = "gpt"))]
 mod partition;
+#[cfg(target_os = "linux")]
 mod snapshot;
+#[cfg(target_os = "linux")]
 mod util;
+#[cfg(target_os = "linux")]
 mod verity;
 
+#[cfg(target_os = "linux")]
 pub use devmap_linux::DevId;
 
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io;
 
 /// One scute's open data and hash inputs.
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct Scute {
     /// Open, readable block device or regular file containing the data.
@@ -58,6 +68,7 @@ pub struct Scute {
 /// Inputs remain open until the chain is
 /// dropped. Assembly rereads their headers using positional I/O; it neither
 /// trusts discovery-time validation nor changes the input file offsets.
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct Chain {
     /// The trusted chain root (operator-supplied, out-of-band).
@@ -70,6 +81,7 @@ pub struct Chain {
 ///
 /// Import this trait for `.assemble()`. This operation blocks; async callers
 /// should run it on their runtime's blocking pool.
+#[cfg(target_os = "linux")]
 pub trait Assemble {
     /// Returns an open device file at offset zero. Deferred removal is already
     /// scheduled: the device remains alive while this file, a clone, a mount,
@@ -78,6 +90,7 @@ pub trait Assemble {
     fn assemble(&self) -> io::Result<std::fs::File>;
 }
 
+#[cfg(target_os = "linux")]
 impl Assemble for Chain {
     fn assemble(&self) -> io::Result<std::fs::File> {
         self.assemble_sync()
@@ -86,14 +99,14 @@ impl Assemble for Chain {
 
 /// Discover a [`Chain`] from GPT partitions visible to the kernel, given
 /// a trusted root hash. Enabled by the `gpt` feature (default on).
-#[cfg(feature = "gpt")]
+#[cfg(all(target_os = "linux", feature = "gpt"))]
 pub trait FromGpt: Sized {
     /// Walk the PARTUUID chain starting from `root`, validate parameters,
     /// and return an ordered [`Chain`] (base → top).
     fn from_gpt(root: &[u8]) -> io::Result<Self>;
 }
 
-#[cfg(feature = "gpt")]
+#[cfg(all(target_os = "linux", feature = "gpt"))]
 impl FromGpt for Chain {
     fn from_gpt(root: &[u8]) -> io::Result<Self> {
         let map = partition::PartitionMap::scan()?;
@@ -111,13 +124,13 @@ impl FromGpt for Chain {
 /// in scope, use `<Chain as AsyncFromGpt>::from_gpt(root)`. Requires a Tokio
 /// runtime; an unpolled future performs no discovery. Once started, discovery
 /// may finish after the future is dropped. The root is copied for the worker.
-#[cfg(all(feature = "gpt", feature = "tokio"))]
+#[cfg(all(target_os = "linux", feature = "gpt", feature = "tokio"))]
 pub trait AsyncFromGpt: Sized {
     /// Find the kernel-visible GPT partitions, ordered base to top.
     fn from_gpt(root: &[u8]) -> impl std::future::Future<Output = io::Result<Self>> + Send + '_;
 }
 
-#[cfg(all(feature = "gpt", feature = "tokio"))]
+#[cfg(all(target_os = "linux", feature = "gpt", feature = "tokio"))]
 impl AsyncFromGpt for Chain {
     async fn from_gpt(root: &[u8]) -> io::Result<Self> {
         let root = root.to_vec();
@@ -126,7 +139,7 @@ impl AsyncFromGpt for Chain {
 }
 
 // Execution boundary for discovery, preserving io errors.
-#[cfg(all(feature = "gpt", feature = "tokio"))]
+#[cfg(all(target_os = "linux", feature = "gpt", feature = "tokio"))]
 async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
@@ -138,7 +151,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| io::Error::other(format!("carapace worker failed: {error}")))?
 }
 
-#[cfg(all(test, feature = "gpt", feature = "tokio"))]
+#[cfg(all(test, target_os = "linux", feature = "gpt", feature = "tokio"))]
 mod async_tests {
     use super::*;
     use std::future::Future;
@@ -215,7 +228,7 @@ mod async_tests {
         dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
-    #[cfg(feature = "gpt")]
+    #[cfg(all(target_os = "linux", feature = "gpt"))]
     #[test]
     fn discovery_errors_match_and_future_is_send() {
         fn check(_: impl Future<Output = io::Result<Chain>> + Send) {}
@@ -228,3 +241,7 @@ mod async_tests {
         assert_eq!(sync.to_string(), asynchronous.to_string());
     }
 }
+
+// Shared format geometry for image conversion and Linux assembly.
+#[cfg(any(target_os = "linux", feature = "image"))]
+pub(crate) const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;

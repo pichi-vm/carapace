@@ -1,27 +1,35 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{next_extent, AsyncPlan, Loading, Metadata, Planned, BATCH, BLOCK};
+use super::{AsyncPlan, Loading, Metadata, Planned, BATCH, BLOCK};
 use std::{
     io,
     pin::Pin,
-    sync::Arc,
     task::{ready, Context, Poll},
 };
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use {super::SparseFile, std::sync::Arc};
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, ReadBuf, SeekFrom};
 
 impl AsyncPlan for Planned<tokio::fs::File> {
     async fn plan(mut image: tokio::fs::File) -> io::Result<Self> {
         let mut metadata = Metadata::new(&image.metadata().await?)?;
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let query = Arc::new(image.try_clone().await?.into_std().await);
         let mut position = 0;
         let mut buffer = vec![0; BATCH];
         while position < metadata.image_size {
-            let file = query.clone();
-            let size = metadata.image_size;
-            let extent = tokio::task::spawn_blocking(move || next_extent(&file, position, size))
-                .await
-                .map_err(io::Error::other)??;
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+            let extent = {
+                let file = query.clone();
+                let size = metadata.image_size;
+                tokio::task::spawn_blocking(move || file.next_extent(position, size))
+                    .await
+                    .map_err(io::Error::other)??
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+            let extent = position..metadata.image_size;
             if extent.start == metadata.image_size {
                 break;
             }

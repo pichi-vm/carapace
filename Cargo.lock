@@ -72,6 +72,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]
@@ -242,7 +243,7 @@ dependencies = [
 [[package]]
 name = "devmap-core"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=0b1fc00f7853ec15535f4ebca2e9f80961390ec3#0b1fc00f7853ec15535f4ebca2e9f80961390ec3"
+source = "git+https://github.com/pichi-vm/devmap.git?rev=b4bf66ac9dea45f79c5f672b642abe4da1ab6870#b4bf66ac9dea45f79c5f672b642abe4da1ab6870"
 dependencies = [
  "iocuddle 0.4.0",
 ]
@@ -250,7 +251,7 @@ dependencies = [
 [[package]]
 name = "devmap-linux"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=0b1fc00f7853ec15535f4ebca2e9f80961390ec3#0b1fc00f7853ec15535f4ebca2e9f80961390ec3"
+source = "git+https://github.com/pichi-vm/devmap.git?rev=b4bf66ac9dea45f79c5f672b642abe4da1ab6870#b4bf66ac9dea45f79c5f672b642abe4da1ab6870"
 dependencies = [
  "devmap-core",
  "iocuddle 0.4.0",
@@ -260,7 +261,7 @@ dependencies = [
 [[package]]
 name = "devmap-snapshot"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=0b1fc00f7853ec15535f4ebca2e9f80961390ec3#0b1fc00f7853ec15535f4ebca2e9f80961390ec3"
+source = "git+https://github.com/pichi-vm/devmap.git?rev=b4bf66ac9dea45f79c5f672b642abe4da1ab6870#b4bf66ac9dea45f79c5f672b642abe4da1ab6870"
 dependencies = [
  "devmap-core",
  "devmap-linux",
@@ -269,7 +270,7 @@ dependencies = [
 [[package]]
 name = "devmap-verity"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=0b1fc00f7853ec15535f4ebca2e9f80961390ec3#0b1fc00f7853ec15535f4ebca2e9f80961390ec3"
+source = "git+https://github.com/pichi-vm/devmap.git?rev=b4bf66ac9dea45f79c5f672b642abe4da1ab6870#b4bf66ac9dea45f79c5f672b642abe4da1ab6870"
 dependencies = [
  "devmap-core",
  "devmap-linux",

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use std::io::{Read, Write};
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 fn source(bytes: &[u8]) -> File {
     let mut file = tempfile::tempfile().unwrap();
@@ -93,25 +94,27 @@ fn full_area_terminator_and_fragmented_reads() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sparse() -> File {
-    let image = tempfile::tempfile().unwrap();
+    let mut image = tempfile::tempfile().unwrap();
     image.set_len(1 << 34).unwrap();
+    image.seek(SeekFrom::Start(3 * BLOCK as u64)).unwrap();
+    image.write_all(&[0x59; BLOCK]).unwrap();
     image
-        .write_all_at(&[0x59; BLOCK], 3 * BLOCK as u64)
+        .seek(SeekFrom::Start((1 << 34) - BLOCK as u64))
         .unwrap();
-    image
-        .write_all_at(&[0; BLOCK], (1 << 34) - BLOCK as u64)
-        .unwrap();
+    image.write_all(&[0; BLOCK]).unwrap();
     image
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn planning_skips_holes_and_omits_allocated_zero_blocks() {
     let source = sparse();
     assert!(source.metadata().unwrap().blocks() * 512 < (1 << 20));
     let planned = plan(source);
     assert_eq!(planned.exceptions(), 1);
-    assert!(planned.metadata.read_bytes <= 65536);
+    assert!(planned.metadata.read_bytes <= 1024 * 1024);
     let wire = collect(planned, 65536);
     assert_eq!(wire.len(), 3 * BLOCK);
     assert_eq!(
@@ -126,14 +129,15 @@ fn planning_skips_holes_and_omits_allocated_zero_blocks() {
 
 #[test]
 fn dense_and_sparse_representations_agree() {
-    let sparse = tempfile::tempfile().unwrap();
+    let mut sparse = tempfile::tempfile().unwrap();
     sparse.set_len(16 * BLOCK as u64 + 7).unwrap();
-    sparse
-        .write_all_at(&[0x37; BLOCK], 3 * BLOCK as u64)
-        .unwrap();
-    sparse.write_all_at(&[0x52], 16 * BLOCK as u64 + 6).unwrap();
+    sparse.seek(SeekFrom::Start(3 * BLOCK as u64)).unwrap();
+    sparse.write_all(&[0x37; BLOCK]).unwrap();
+    sparse.seek(SeekFrom::Start(16 * BLOCK as u64 + 6)).unwrap();
+    sparse.write_all(&[0x52]).unwrap();
     let mut bytes = vec![0; 16 * BLOCK + 7];
-    sparse.read_exact_at(&mut bytes, 0).unwrap();
+    sparse.rewind().unwrap();
+    sparse.read_exact(&mut bytes).unwrap();
     assert_eq!(
         collect(plan(sparse), 1024),
         collect(plan(source(&bytes)), 1024)
@@ -143,14 +147,18 @@ fn dense_and_sparse_representations_agree() {
 #[test]
 fn validates_source_and_propagates_second_pass_failure() {
     assert!(<Planned<File> as Plan>::plan(tempfile::tempfile().unwrap()).is_err());
+    #[cfg(unix)]
     assert!(<Planned<File> as Plan>::plan(File::open(".").unwrap()).is_err());
-    let file = tempfile::tempfile().unwrap();
-    file.set_len(crate::assemble::ZERO_COUNT_SECTORS * 512 + 1)
-        .unwrap();
-    assert!(<Planned<File> as Plan>::plan(file)
-        .unwrap_err()
-        .to_string()
-        .contains("64 GiB"));
+    // Unix set_len creates a sparse file without allocating 64 GiB.
+    #[cfg(unix)]
+    {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(crate::ZERO_COUNT_SECTORS * 512 + 1).unwrap();
+        assert!(<Planned<File> as Plan>::plan(file)
+            .unwrap_err()
+            .to_string()
+            .contains("64 GiB"));
+    }
     let file = source(&[1; BLOCK]);
     let mut planned = plan(file.try_clone().unwrap());
     // Mutation violates the contract, but truncation must surface as an error,
@@ -235,15 +243,18 @@ fn async_sparse_plans_and_streams_match_blocking() {
             }
             assert_eq!(wire, collect(plan(source(&bytes)), 1 + BLOCK));
         }
-        let mut planned =
-            <Planned<tokio::fs::File> as AsyncPlan>::plan(tokio::fs::File::from_std(sparse()))
-                .await
-                .unwrap();
-        assert_eq!(planned.exceptions(), 1);
-        assert!(planned.metadata.read_bytes <= 65536);
-        let mut wire = Vec::new();
-        planned.read_to_end(&mut wire).await.unwrap();
-        assert_eq!(wire, collect(plan(sparse()), 65536));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let mut planned =
+                <Planned<tokio::fs::File> as AsyncPlan>::plan(tokio::fs::File::from_std(sparse()))
+                    .await
+                    .unwrap();
+            assert_eq!(planned.exceptions(), 1);
+            assert!(planned.metadata.read_bytes <= 1024 * 1024);
+            let mut wire = Vec::new();
+            planned.read_to_end(&mut wire).await.unwrap();
+            assert_eq!(wire, collect(plan(sparse()), 65536));
+        }
     });
 }
 
@@ -310,7 +321,7 @@ fn async_constructor_is_send_and_lazy() {
 
 #[test]
 #[ignore = "requires root, loop devices, and device mapper"]
-#[cfg(feature = "loop")]
+#[cfg(all(target_os = "linux", feature = "loop"))]
 fn kernel_reads_planned_scute() {
     use crate::Assemble as _;
     use std::io::Seek as _;

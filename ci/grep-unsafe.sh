@@ -2,31 +2,33 @@
 # SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-# CI gate: carapace contains NO `unsafe` — all of it lives in the devmap /
-# lodown substrate crates. The crate root already sets
-# `#![forbid(unsafe_code)]`; this grep is defense-in-depth against a future
-# contributor flipping that attribute. Comment-only lines are exempt (module
-# docstrings discuss `unsafe`).
+# The compiler denies unsafe code except in the Windows allocated-range query.
+# Reject additional unsafe blocks or lint exceptions, including in other files.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if command -v rg >/dev/null 2>&1; then
-    matches=$(rg --line-number --type rust '\bunsafe\b' src/ \
-        | grep -vE ':\s*//' \
-        | grep -vE '\s*//.*\bunsafe\b' \
-        || true)
-else
-    matches=$(grep -RnE '\bunsafe\b' src/ \
-        | grep -vE ':\s*//' \
-        | grep -vE '\s*//.*\bunsafe\b' \
-        || true)
-fi
+python3 - <<'PYTHON'
+from pathlib import Path
+import re
 
-if [ -n "$matches" ]; then
-    echo "FAIL: unsafe keyword found in carapace src/ (all unsafe belongs in devmap/lodown):" >&2
-    echo "$matches" >&2
-    exit 1
-fi
-
-echo "OK: carapace src/ is unsafe-free"
+allowed = {
+    ('src/image/windows.rs', '#[expect(unsafe_code, reason = "private Windows allocated-range FFI boundary")]'),
+    ('src/image/windows.rs', 'unsafe {'),
+}
+seen = set()
+for path in Path('src').rglob('*.rs'):
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        code = line.split('//', 1)[0].strip()
+        if re.fullmatch(r'#!?\[(?:deny|forbid)\(unsafe_code\)\]', code):
+            continue
+        if not re.search(r'\bunsafe(?:_code)?\b', code):
+            continue
+        entry = (str(path), code)
+        if entry not in allowed or entry in seen:
+            raise SystemExit(f'Unexpected unsafe code or exception: {path}:{number}: {line}')
+        seen.add(entry)
+if seen != allowed:
+    raise SystemExit('Expected exactly one Windows allocated-range unsafe boundary')
+print('OK: only the private Windows allocated-range query permits unsafe code')
+PYTHON

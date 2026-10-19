@@ -21,33 +21,37 @@ loop = ["dep:lodown"]
 # Async discovery adapter (with gpt); the default build needs no runtime.
 tokio = ["dep:tokio", "devmap-verity/tokio"]
 # Userspace base-scute conversion; not needed by the initrd assembler.
-rustix = ["dep:rustix"]
+image = ["dep:rustix", "dep:windows-sys"]
 
-# carapace is Linux-only: the whole library and CLI drive device-mapper. Gate
-# the deps to Linux too, so a consumer that pulls the lib on another target
-# resolves it to an empty crate instead of compiling the Linux-only ioctl
-# stack.
-[target.'cfg(target_os = "linux")'.dependencies]
-# Device control, snapshot/zero targets, and the shared verity format.
-# No userspace hashing required. Git dependencies are pinned to revisions.
-devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
-devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
-devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
-devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
-# Safe loop-device wrapper for file-backed scutes (feature `loop`).
-lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
+# Portable geometry, snapshot codecs, and verity formatting.
+[dependencies]
+devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
+devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
 tokio = { version = "1", features = ["rt", "fs", "io-util"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading"], optional = true }
+
+# Device-mapper control and loop attachment are Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
+lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
-devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3", features = ["sha2"] }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870", features = ["sha2"] }
 gpt = "4"
-lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9" }
 serial_test = { version = "3", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "fs", "io-util"] }
 uuid = "1"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9" }
 
 [[bench]]
 name = "block_device"
@@ -55,9 +59,8 @@ harness = false
 required-features = ["gpt"]
 
 [lints.rust]
-# All unsafe now lives in the devmap/lodown substrate crates; carapace is
-# unsafe-free.
-unsafe_code = "forbid"
+# Only the private Windows allocated-range query may override this lint.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"

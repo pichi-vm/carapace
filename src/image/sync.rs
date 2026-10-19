@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{next_extent, Metadata, Plan, Planned, BATCH, BLOCK};
+use super::{Metadata, Plan, Planned, SparseFile, BATCH, BLOCK};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
@@ -13,7 +13,7 @@ impl Plan for Planned<File> {
         let mut position = 0;
         let mut buffer = vec![0; BATCH];
         while position < metadata.image_size {
-            let extent = next_extent(&image, position, metadata.image_size)?;
+            let extent = image.next_extent(position, metadata.image_size)?;
             if extent.start == metadata.image_size {
                 break;
             }

@@ -4,27 +4,28 @@
 //! Plan an image-to-base-scute conversion, then stream its COW bytes.
 //!
 //! Import [`Plan`] or `AsyncPlan` (with the `tokio` feature) to construct a
-//! [`Planned`] reader. Construction scans allocated extents in batches, omits
-//! zero chunks, and retains all exception
-//! metadata. Reading then emits that metadata and rereads only selected source
-//! chunks. There is no output file, hash generation, or metadata-group data buffer.
+//! [`Planned`] reader. Planning scans the source for nonzero chunks; streaming
+//! rereads the selected chunks and emits a base-scute COW stream.
 //!
-//! The source must be an immutable, nonempty regular file fitting carapace's
-//! current 64 GiB dm-zero origin. Do not mutate it or use duplicated descriptors
-//! concurrently with construction or reading. A partial final chunk is zero-padded.
-//! Sparse queries use SEEK_DATA/SEEK_HOLE, with a scanning fallback when unsupported.
-//! Memory for retained metadata grows with the number of exceptions.
+//! The source must be an immutable, nonempty regular file of at most 64 GiB.
+//! Do not mutate it or use duplicated handles during planning or reading.
+//! A partial final chunk is zero-padded to 4096 bytes. Sparse holes are skipped
+//! where supported; otherwise planning scans the entire source. Memory usage
+//! grows with the number of nonzero chunks.
 //!
-//! Use [`Planned::size`] and carapace's 4096-byte chunk geometry to
-//! configure verity before reading.
+//! [`Planned::size`] gives the exact padded COW length before streaming, for
+//! example to configure a verity formatter. It excludes the separate hash tree.
 
 #[cfg(feature = "tokio")]
 mod asynchronous;
 mod sync;
+#[cfg(windows)]
+mod windows;
 
 use devmap_core::BlockSize;
 use devmap_snapshot::{Exception, Header};
-use std::{fs::File, io, num::NonZero, ops::Range};
+use std::ops::Range;
+use std::{fs::File, io, num::NonZero};
 
 const BLOCK: usize = 4096;
 const BATCH: usize = 1024 * 1024;
@@ -147,7 +148,7 @@ impl Metadata {
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(invalid("expected a nonempty regular image file"));
         }
-        if metadata.len() > crate::assemble::ZERO_COUNT_SECTORS * 512 {
+        if metadata.len() > crate::ZERO_COUNT_SECTORS * 512 {
             return Err(invalid("image exceeds the 64 GiB virtual origin"));
         }
         let chunk_size = NonZero::new(BLOCK as u32)
@@ -208,32 +209,56 @@ impl Metadata {
     }
 }
 
+/// Internal safe extension for querying source data extents.
+///
+/// Returns the next possibly allocated range within `position..size`, or
+/// `size..size` when none remains. Unsupported filesystems return the remaining
+/// interval for sequential scanning. Allocated ranges may still contain zeros.
+/// The source must remain unchanged while planning; Unix queries move its cursor.
+trait SparseFile {
+    fn next_extent(&self, position: u64, size: u64) -> io::Result<Range<u64>>;
+}
+
 // Query only at extent boundaries, never once per chunk in a hole. Filesystems
 // may conservatively report holes as data; the content scan remains authoritative.
-fn next_extent(input: &File, position: u64, size: u64) -> io::Result<Range<u64>> {
-    use rustix::{
-        fs::{seek, SeekFrom},
-        io::Errno,
-    };
-    let unsupported = |e| matches!(e, Errno::INVAL | Errno::OPNOTSUPP | Errno::NOSYS);
-    let start = match seek(input, SeekFrom::Data(position)) {
-        Ok(start) => start,
-        Err(Errno::NXIO) => return Ok(size..size),
-        Err(e) if unsupported(e) => return Ok(position..size),
-        Err(e) => return Err(e.into()),
-    };
-    let end = match seek(input, SeekFrom::Hole(start)) {
-        Ok(end) => end.min(size),
-        Err(e) if unsupported(e) => return Ok(position..size),
-        Err(e) => return Err(e.into()),
-    };
-    if start < position || end <= start || start >= size {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid or changing sparse extent",
-        ));
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl SparseFile for File {
+    fn next_extent(&self, position: u64, size: u64) -> io::Result<Range<u64>> {
+        use rustix::{
+            fs::{seek, SeekFrom},
+            io::Errno,
+        };
+        if position >= size {
+            return Ok(size..size);
+        }
+        let unsupported = |e| matches!(e, Errno::INVAL | Errno::OPNOTSUPP | Errno::NOSYS);
+        let start = match seek(self, SeekFrom::Data(position)) {
+            Ok(start) => start,
+            Err(Errno::NXIO) => return Ok(size..size),
+            Err(e) if unsupported(e) => return Ok(position..size),
+            Err(e) => return Err(e.into()),
+        };
+        let end = match seek(self, SeekFrom::Hole(start)) {
+            Ok(end) => end.min(size),
+            Err(e) if unsupported(e) => return Ok(position..size),
+            Err(e) => return Err(e.into()),
+        };
+        if start < position || end <= start || start >= size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid or changing sparse extent",
+            ));
+        }
+        Ok(start..end)
     }
-    Ok(start..end)
+}
+
+// Other platforms scan the source; omission of zero chunks remains identical.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+impl SparseFile for File {
+    fn next_extent(&self, position: u64, size: u64) -> io::Result<Range<u64>> {
+        Ok(position.min(size)..size)
+    }
 }
 
 #[cfg(test)]

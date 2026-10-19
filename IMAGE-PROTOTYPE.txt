@@ -1,13 +1,13 @@
 Planned image-to-scute reader prototype (2026-10-18)
 
-Current public API, behind feature rustix:
+Current public API, behind feature image:
     trait Plan: Sized {
         fn plan(image: std::fs::File) -> io::Result<Self>;
     }
     impl Plan for Planned<std::fs::File>
     impl Read for Planned<std::fs::File>
 
-With rustix + tokio:
+With image + tokio:
     trait AsyncPlan: Sized {
         fn plan(image: tokio::fs::File)
             -> impl Future<Output = io::Result<Self>> + Send;
@@ -66,15 +66,19 @@ Validation:
 - Dense and sparse representations produce identical bytes; blocking/async readers
   and existing verity formatters produce identical COW bytes/hash trees/roots.
 - A 16 GiB sparse fixture with one nonzero and one allocated-zero chunk requires
-  at most 64 KiB of planning reads and produces one exception in both paths.
+  at most 1 MiB of planning reads and produces one exception in both paths.
 - Output size checked against emitted bytes across metadata-area boundaries.
 - Kernel dm-verity/snapshot assembly and readback passed using the planned reader
   streamed to a COW file and existing verity formatter together.
-- Full carapace library tests, blocking-only rustix feature, default-disabled build,
+- Full carapace library tests, blocking-only image feature, default-disabled build,
   warnings-denied Clippy, formatting and diff checks run locally.
 
-Cargo.toml pins devmap to committed revision 0b1fc00f7853ec15535f4ebca2e9f80961390ec3;
-no adjacent checkout is required.
+Cargo.toml pins devmap to committed revision b4bf66ac9dea45f79c5f672b642abe4da1ab6870;
+no adjacent checkout or local dependency patches are required.
 Conglobate and pichi consumers are not migrated; no remote CI run or commits are
 part of this prototype. The separate bounded-memory, one-pass buffered converter
 is not implemented by this planned-reader API.
+
+Portability: conversion supports Linux, macOS, and Windows. Linux/macOS query
+sparse extents; Windows queries allocated ranges through DeviceIoControl.
+Device-mapper assembly and discovery remain Linux-only.

@@ -11,6 +11,17 @@ This package contains the `carapace` library and CLI. It uses the external
 `devmap-core`, `devmap-linux`, `devmap-snapshot`, `devmap-verity`, and
 optional `lodown` crates.
 
+## Platforms
+
+Image conversion supports Linux, macOS, and Windows with the `image` feature.
+The `image::Plan` trait constructs a `Planned<std::fs::File>` reader; adding
+`tokio` enables `image::AsyncPlan` and `Planned<tokio::fs::File>`.
+`size()` gives the exact padded COW length before streaming to a verity formatter.
+Linux, macOS, and Windows skip sparse holes where the filesystem supports it,
+falling back to sequential scanning otherwise; the resulting COW bytes are identical.
+
+Discovery, device-mapper assembly, loop attachment, and the CLI require Linux.
+
 ## Library API
 
 ```rust,no_run
