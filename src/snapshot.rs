@@ -11,28 +11,13 @@
 //! All numeric fields are little-endian.
 
 use std::io;
-use zerocopy::little_endian::U32;
-use zerocopy::{FromBytes, Immutable, KnownLayout};
-
 /// "SnAp" little-endian.
+#[cfg(test)]
 pub(crate) const SNAPSHOT_MAGIC: u32 = 0x7041_6e53;
 pub(crate) const SNAPSHOT_HEADER_SIZE: usize = 16;
-const SNAPSHOT_VALID: u32 = 1;
-const SNAPSHOT_VERSION: u32 = 1;
 /// The specification’s Parameter Whitelist requires chunk_size to equal 8
 /// (sectors; equivalent to 4096 bytes).
 const RDP_CHUNK_SIZE: u32 = 8;
-
-#[derive(FromBytes, KnownLayout, Immutable, Debug, Clone, Copy)]
-#[repr(C)]
-struct RawSnapshotHeader {
-    magic: U32,
-    valid: U32,
-    version: U32,
-    chunk_size: U32,
-}
-
-const _: () = assert!(core::mem::size_of::<RawSnapshotHeader>() == SNAPSHOT_HEADER_SIZE);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ValidatedSnapshotHeader {
@@ -57,31 +42,15 @@ impl ValidatedSnapshotHeader {
                 bytes.len()
             )));
         }
-        let raw = RawSnapshotHeader::ref_from_bytes(&bytes[..SNAPSHOT_HEADER_SIZE])
-            .map_err(|_| invalid("alignment / size".into()))?;
-
-        if raw.magic.get() != SNAPSHOT_MAGIC {
-            return Err(invalid(format!(
-                "magic = {:#x}, expected {:#x}",
-                raw.magic.get(),
-                SNAPSHOT_MAGIC
-            )));
+        let record = bytes[..SNAPSHOT_HEADER_SIZE]
+            .try_into()
+            .map_err(|_| invalid("record size".into()))?;
+        let header =
+            devmap_snapshot::Header::decode(record).map_err(|error| invalid(error.to_string()))?;
+        if !header.valid {
+            return Err(invalid("snapshot is invalidated".into()));
         }
-        if raw.valid.get() != SNAPSHOT_VALID {
-            return Err(invalid(format!(
-                "valid = {}, expected {}",
-                raw.valid.get(),
-                SNAPSHOT_VALID
-            )));
-        }
-        if raw.version.get() != SNAPSHOT_VERSION {
-            return Err(invalid(format!(
-                "version = {}, expected {}",
-                raw.version.get(),
-                SNAPSHOT_VERSION
-            )));
-        }
-        let chunk_size = raw.chunk_size.get();
+        let chunk_size = header.chunk_size.bytes().get() / 512;
         if chunk_size != RDP_CHUNK_SIZE {
             return Err(invalid(format!(
                 "chunk_size = {chunk_size}, expected {RDP_CHUNK_SIZE} (spec Parameter Whitelist)"

@@ -20,7 +20,7 @@ use std::io;
 use std::os::unix::fs::{FileExt, FileTypeExt};
 
 /// Preserve the existing 64 GiB virtual origin size during the API migration.
-const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;
+pub(crate) const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;
 
 #[derive(Debug)]
 struct PreparedScute<'a> {

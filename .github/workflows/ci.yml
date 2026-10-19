@@ -89,6 +89,8 @@ jobs:
           cargo test --locked --no-default-features --features loop --lib --bins
           cargo test --locked --no-default-features --features tokio --lib --bins
           cargo test --locked --no-default-features --features loop,tokio --lib --bins
+          cargo test --locked --no-default-features --features image --lib --bins
+          cargo test --locked --no-default-features --features image,tokio --lib --bins
           cargo test --locked --features tokio --lib --bins
           cargo test --locked --features loop --lib --bins
           cargo test --locked --all-features --lib --bins
@@ -103,6 +105,10 @@ jobs:
             "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
             "RUSTFLAGS=-D warnings" \
             cargo test --locked --all-features --tests -- --test-threads=1
+          sudo env "PATH=$PATH" "HOME=$HOME" \
+            "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
+            "RUSTFLAGS=-D warnings" \
+            cargo test --locked --all-features --lib image::tests::kernel_reads_planned_scute -- --ignored --test-threads=1
       - name: Block-device benchmark smoke test (root)
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n

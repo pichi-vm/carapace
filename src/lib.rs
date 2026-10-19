@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! carapace — read-side library for carapace block-device chains.
+//! carapace — assembly and optional image conversion for carapace chains.
 //!
 //! Assembles a cryptographically-bound chain of content-addressable
 //! block-device scutes into a unified, integrity-protected,
@@ -10,7 +10,7 @@
 //! `/sys/class/block/*/uevent` (PARTUUID lookup), validates every scute's
 //! parameters against the RDP whitelist, and builds the dm-verity +
 //! dm-snapshot stack. The on-disk format is specified in `docs/spec.md`; this
-//! crate is read-only at the operator surface.
+//! CLI is read-only; the optional `image` feature adds userspace conversion.
 //!
 //! # Library API
 //!
@@ -19,6 +19,8 @@
 //! - [`Assemble::assemble`] — build the dm stack and return a [`std::fs::File`].
 //! - `FromGpt` — discover a `Chain` by PARTUUID walk (feature `gpt`).
 //! - `AsyncFromGpt` — Tokio discovery (features `gpt` + `tokio`).
+//! - `image::Plan` / `image::AsyncPlan` — planned base-scute readers
+//!   (feature `image`, plus `tokio` for asynchronous conversion).
 //!
 //! Re-export: [`DevId`].
 
@@ -28,6 +30,8 @@
 mod assemble;
 #[cfg(feature = "gpt")]
 mod chain;
+#[cfg(feature = "image")]
+pub mod image;
 #[cfg(feature = "gpt")]
 mod partition;
 mod snapshot;

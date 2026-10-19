@@ -19,7 +19,9 @@ gpt = []
 # File-backed scutes: loop-attach `data`/`hash` files via lodown.
 loop = ["dep:lodown"]
 # Async discovery adapter (with gpt); the default build needs no runtime.
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "devmap-verity/tokio"]
+# Userspace base-scute conversion; not needed by the initrd assembler.
+image = ["dep:rustix"]
 
 # carapace is Linux-only: the whole library and CLI drive device-mapper. Gate
 # the deps to Linux too, so a consumer that pulls the lib on another target
@@ -28,19 +30,18 @@ tokio = ["dep:tokio"]
 [target.'cfg(target_os = "linux")'.dependencies]
 # Device control, snapshot/zero targets, and the shared verity format.
 # No userspace hashing required. Git dependencies are pinned to revisions.
-devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
-devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
-devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
-devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72" }
+devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
+devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
+devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3" }
 # Safe loop-device wrapper for file-backed scutes (feature `loop`).
 lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
-tokio = { version = "1", features = ["rt"], optional = true }
-# zerocopy for snapshot header parsing.
-zerocopy = { version = "0.8", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "fs", "io-util"], optional = true }
+rustix = { version = "1", features = ["fs"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
-devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "6ebfb76008fc3d5e2c933a2ff4697827f5f9fd72", features = ["sha2"] }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "0b1fc00f7853ec15535f4ebca2e9f80961390ec3", features = ["sha2"] }
 gpt = "4"
 lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9" }
 serial_test = { version = "3", default-features = false }
