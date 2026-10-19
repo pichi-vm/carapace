@@ -21,7 +21,7 @@ loop = ["dep:lodown"]
 # Async discovery adapter (with gpt); the default build needs no runtime.
 tokio = ["dep:tokio", "devmap-verity/tokio"]
 # Userspace base-scute conversion; not needed by the initrd assembler.
-image = ["dep:rustix"]
+rustix = ["dep:rustix"]
 
 # carapace is Linux-only: the whole library and CLI drive device-mapper. Gate
 # the deps to Linux too, so a consumer that pulls the lib on another target

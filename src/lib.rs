@@ -10,7 +10,7 @@
 //! `/sys/class/block/*/uevent` (PARTUUID lookup), validates every scute's
 //! parameters against the RDP whitelist, and builds the dm-verity +
 //! dm-snapshot stack. The on-disk format is specified in `docs/spec.md`; this
-//! CLI is read-only; the optional `image` feature adds userspace conversion.
+//! CLI is read-only; the optional `rustix` feature adds userspace conversion.
 //!
 //! # Library API
 //!
@@ -20,7 +20,7 @@
 //! - `FromGpt` — discover a `Chain` by PARTUUID walk (feature `gpt`).
 //! - `AsyncFromGpt` — Tokio discovery (features `gpt` + `tokio`).
 //! - `image::Plan` / `image::AsyncPlan` — planned base-scute readers
-//!   (feature `image`, plus `tokio` for asynchronous conversion).
+//!   (feature `rustix`, plus `tokio` for asynchronous conversion).
 //!
 //! Re-export: [`DevId`].
 
@@ -30,7 +30,7 @@
 mod assemble;
 #[cfg(feature = "gpt")]
 mod chain;
-#[cfg(feature = "image")]
+#[cfg(feature = "rustix")]
 pub mod image;
 #[cfg(feature = "gpt")]
 mod partition;

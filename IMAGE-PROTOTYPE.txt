@@ -1,13 +1,13 @@
 Planned image-to-scute reader prototype (2026-10-18)
 
-Current public API, behind feature image:
+Current public API, behind feature rustix:
     trait Plan: Sized {
         fn plan(image: std::fs::File) -> io::Result<Self>;
     }
     impl Plan for Planned<std::fs::File>
     impl Read for Planned<std::fs::File>
 
-With image + tokio:
+With rustix + tokio:
     trait AsyncPlan: Sized {
         fn plan(image: tokio::fs::File)
             -> impl Future<Output = io::Result<Self>> + Send;
@@ -70,7 +70,7 @@ Validation:
 - Output size checked against emitted bytes across metadata-area boundaries.
 - Kernel dm-verity/snapshot assembly and readback passed using the planned reader
   streamed to a COW file and existing verity formatter together.
-- Full carapace library tests, blocking-only image feature, default-disabled build,
+- Full carapace library tests, blocking-only rustix feature, default-disabled build,
   warnings-denied Clippy, formatting and diff checks run locally.
 
 Cargo.toml pins devmap to committed revision 0b1fc00f7853ec15535f4ebca2e9f80961390ec3;

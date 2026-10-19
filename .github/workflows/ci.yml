@@ -89,8 +89,8 @@ jobs:
           cargo test --locked --no-default-features --features loop --lib --bins
           cargo test --locked --no-default-features --features tokio --lib --bins
           cargo test --locked --no-default-features --features loop,tokio --lib --bins
-          cargo test --locked --no-default-features --features image --lib --bins
-          cargo test --locked --no-default-features --features image,tokio --lib --bins
+          cargo test --locked --no-default-features --features rustix --lib --bins
+          cargo test --locked --no-default-features --features rustix,tokio --lib --bins
           cargo test --locked --features tokio --lib --bins
           cargo test --locked --features loop --lib --bins
           cargo test --locked --all-features --lib --bins
