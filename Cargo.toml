@@ -25,9 +25,9 @@ image = ["dep:rustix", "dep:windows-sys"]
 
 # Portable geometry, snapshot codecs, and verity formatting.
 [dependencies]
-devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
-devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
-devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
+devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "2679426fa1d4508fc5c3bbdf643efbdbe64a3edd" }
+devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "2679426fa1d4508fc5c3bbdf643efbdbe64a3edd" }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "2679426fa1d4508fc5c3bbdf643efbdbe64a3edd" }
 tokio = { version = "1", features = ["rt", "fs", "io-util"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -38,12 +38,12 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 # Device-mapper control and loop attachment are Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
-devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870" }
+devmap-linux = { git = "https://github.com/pichi-vm/devmap.git", rev = "2679426fa1d4508fc5c3bbdf643efbdbe64a3edd" }
 lodown = { git = "https://github.com/pichi-vm/lodown.git", rev = "31f8951293af180150e5e4c654c47a5b190097b9", optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
-devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "b4bf66ac9dea45f79c5f672b642abe4da1ab6870", features = ["sha2"] }
+devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "2679426fa1d4508fc5c3bbdf643efbdbe64a3edd", features = ["sha2"] }
 gpt = "4"
 serial_test = { version = "3", default-features = false }
 tempfile = "3"
