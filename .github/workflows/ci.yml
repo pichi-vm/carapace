@@ -30,10 +30,17 @@ jobs:
         run: |
           if [ -n "$PR_BASE" ]; then
             commit_range="origin/$PR_BASE..HEAD"
-          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] &&
+               git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null &&
+               git merge-base --is-ancestor "$PUSH_BEFORE" HEAD; then
             commit_range="$PUSH_BEFORE..HEAD"
           else
-            commit_range="HEAD^..HEAD"
+            git fetch --no-tags origin main:refs/remotes/origin/main
+            commit_range="origin/main..HEAD"
+            if [ "$(git rev-list --count "$commit_range")" -eq 0 ]; then
+              echo "No new commits to check"
+              exit 0
+            fi
           fi
           pipx run gitlint --commits "$commit_range"
 
