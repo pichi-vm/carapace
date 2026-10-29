@@ -7,7 +7,7 @@ use crate::snapshot::{ValidatedSnapshotHeader, SNAPSHOT_HEADER_SIZE};
 use crate::util::hex_lower;
 use crate::verity::superblock::VERITY_SUPERBLOCK_SIZE;
 use crate::verity::ValidatedVeritySuperblock;
-use crate::{Chain, Scute};
+use crate::{Chain, Scute, ZERO_SIZE_SECTORS};
 use devmap_core::{BlockSize, Span};
 use devmap_linux::records::Records;
 use devmap_linux::targets::{Target, Zero};
@@ -18,8 +18,6 @@ use devmap_snapshot::{
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{FileExt, FileTypeExt};
-
-use crate::ZERO_COUNT_SECTORS;
 
 #[derive(Debug)]
 struct PreparedScute<'a> {
@@ -89,7 +87,7 @@ impl Chain {
         let assembler = Assembler {
             control: Control::open()?,
         };
-        let mut origin = assembler.activate("CARAPACE-z", ZERO_COUNT_SECTORS, Zero)?;
+        let mut origin = assembler.activate("CARAPACE-z", ZERO_SIZE_SECTORS, Zero)?;
         for (index, scute) in prepared.iter().enumerate() {
             origin = assembler
                 .scute(scute, origin, index)
@@ -219,7 +217,7 @@ impl Assembler {
             discard: Discard::Disabled,
         });
         // The upper mapping holds origin/verity before their files close.
-        self.activate(&name, ZERO_COUNT_SECTORS, snapshot)
+        self.activate(&name, ZERO_SIZE_SECTORS, snapshot)
     }
 
     /// New mappings get rollback guards. Existing mappings are pinned and

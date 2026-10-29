@@ -6,7 +6,7 @@
 
 mod common;
 
-use carapace::{Assemble, Chain, DevId, FromGpt};
+use carapace::{Assemble, Chain, DevId, FromGpt, ZERO_SIZE_SECTORS};
 use common::{build_chain, carapace_devices_present, decode_hex, with_mounted, AttachedImage};
 use devmap_linux::records::Records;
 use serial_test::serial;
@@ -51,6 +51,21 @@ fn torn_down() {
         !carapace_devices_present(Duration::from_secs(5)),
         "mapping leaked"
     );
+}
+
+#[test]
+#[serial]
+fn assembled_chain_reports_zero_size_sectors() {
+    if !available() {
+        return;
+    }
+    let (_dir, _attached, chain) = fixture(2);
+    let top = chain.assemble().unwrap();
+    let id = DevId::try_from(top.metadata().unwrap()).unwrap();
+    let size = std::fs::read_to_string(format!("/sys/dev/block/{id}/size")).unwrap();
+    assert_eq!(size.trim().parse::<u64>().unwrap(), ZERO_SIZE_SECTORS);
+    drop(top);
+    torn_down();
 }
 
 #[test]

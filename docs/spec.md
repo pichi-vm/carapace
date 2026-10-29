@@ -233,7 +233,7 @@ The following values are fixed by this specification. All consumers use these ex
 | Constant | Value | Role |
 |---|---|---|
 | `ZERO_START` | `0` | Starting sector of the dm-zero mapping table entry |
-| `ZERO_COUNT` | `2⁵⁶` sectors (32 EiB at 512-byte sectors) | Number of sectors in the dm-zero mapping table entry, i.e. the apparent size of the dm-zero device under the base scute's snapshot origin |
+| `ZERO_SIZE_SECTORS` | `2⁵³` sectors (`ZERO_SIZE_BYTES` = `2⁶²` bytes, 4 EiB) | Number of sectors in the dm-zero mapping table entry, i.e. the apparent size of the dm-zero device under the base scute's snapshot origin |
 
 A consumer also holds these per-consumer values, whose integrity is assured by whatever mechanism assures the consumer's own integrity:
 
@@ -279,7 +279,7 @@ Given an ordered sequence of scutes and a trusted `rootₙ₋₁`, a consumer MU
 
 **Chunk-size consistency.** The `chunk_size` field in each scute's dm-snapshot header (read through the activated dm-verity device so that it is integrity-protected) MUST be identical across all scutes and MUST equal the whitelisted `chunk_size` (see [Parameter Whitelist](#parameter-whitelist)).
 
-**Device setup.** Once the above checks pass, the consumer activates the device-mapper stack bottom-up: a dm-zero device with the mapping table entry `ZERO_START ZERO_COUNT zero`, then for each scute in order `0..N` a dm-verity device over the data and hash files (using the computed `rootᵢ` as the expected root and the superblock's salt contents), then a dm-snapshot device whose origin is the previous scute (dm-zero for the base, the prior snapshot otherwise) and whose CoW device is the current scute's dm-verity device. The top snapshot is the composed carapace.
+**Device setup.** Once the above checks pass, the consumer activates the device-mapper stack bottom-up: a dm-zero device with the mapping table entry `ZERO_START ZERO_SIZE_SECTORS zero`, then for each scute in order `0..N` a dm-verity device over the data and hash files (using the computed `rootᵢ` as the expected root and the superblock's salt contents), then a dm-snapshot device whose origin is the previous scute (dm-zero for the base, the prior snapshot otherwise) and whose CoW device is the current scute's dm-verity device. The top snapshot is the composed carapace.
 
 Any failure at any step is a hard failure; the composed device MUST NOT be exposed. Subsequent runtime integrity failures from dm-verity on block reads are also hard failures.
 
@@ -398,7 +398,7 @@ This design moves the chain-terminator marker into the dm-verity-hashed salt its
 
 ### Why `rootₙ₋₁` is the only trust anchor
 
-Everything else is either content-derived (PARTUUIDs, roots, salts, chain parameters read from the base scute), fixed by this specification (`ZERO_START`, `ZERO_COUNT`), or a property of the consumer implementation (the parameter whitelist, the supported set of hash algorithms). Additional anchors would be redundant.
+Everything else is either content-derived (PARTUUIDs, roots, salts, chain parameters read from the base scute), fixed by this specification (`ZERO_START`, `ZERO_SIZE_SECTORS`), or a property of the consumer implementation (the parameter whitelist, the supported set of hash algorithms). Additional anchors would be redundant.
 
 ### Why standard on-disk formats throughout
 
@@ -416,11 +416,11 @@ A blocklist permits any value not yet known to be unsafe; that is the wrong defa
 
 For non-base scutes, the prefix carries the chain's trust binding: it is the parent's root hash, which the consumer validates. The suffix is builder-defined and opaque to the consumer. Setting the suffix to empty yields deterministic scute identity — same content plus same parent plus same parameters produces the same `rootᵢ` — which enables content-addressed caching, reproducible builds, and cross-builder dedup. Builders who want to distinguish otherwise-identical scutes (different instances, provenance markers) use a non-empty suffix. Trust properties depend only on the prefix; the suffix affects `rootᵢ` but plays no role in the consumer's trust check beyond whatever cascade effect it has on subsequent chain values. The base scute uses a zero prefix to mark the absence of a parent. Its optional suffix is builder-defined, typically random; the full salt contributes to `root₀`.
 
-### Why `ZERO_COUNT` is a specification constant
+### Why `ZERO_SIZE_SECTORS` is a specification constant
 
 dm-zero requires a size at activation time; that size is one of the inputs to the dm-zero mapping table entry. Making it a per-carapace value would require a signed communication channel between the builder and the consumer with no clean home. Making it per-consumer would fragment the interop surface — a carapace that works on one consumer might fail on another.
 
-The chosen value (`2⁵⁶` sectors ≈ 32 EiB) is far above the maximum size of any distributable filesystem: larger than ext4's 1 EiB ceiling, at parity with btrfs and XFS (16 EiB), and well below 2⁶³ so there is no signed/unsigned arithmetic ambiguity in any plausible implementation. dm-zero is virtual; declaring a huge size costs nothing at runtime. Any carapace whose actual composed device size is smaller (which is every realistic carapace) sees the extra sectors as unused tail.
+The chosen value (`2⁵³` sectors) is the largest power of two Linux device-mapper accepts: devices must be smaller than `2⁵⁴` sectors (at most `2⁶³ - 512` bytes), as enforced by kernel commit `45fc7285` ("dm: restrict dm device size to 2^63-512 bytes") and its stable backports. It remains far above any realistic filesystem image, including ext4's 1 EiB ceiling. `ZERO_SIZE_SECTORS` counts 512-byte sectors; its byte size, `ZERO_SIZE_BYTES` (`2⁶²` bytes, 4 EiB), still fits in an unsigned 64-bit integer. dm-zero is virtual, so the declared size does not allocate backing storage. Every realistic carapace uses only part of the device and sees the extra sectors as unused tail.
 
 ### Why the superblock `uuid` carries no trust
 

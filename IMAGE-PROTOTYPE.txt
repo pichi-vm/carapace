@@ -51,7 +51,8 @@ directly to AsyncFormat. Verity's known-length contract is unchanged.
 
 The source must remain immutable and exclusively used across BOTH passes,
 including any duplicated descriptors. Construction requires a nonempty regular
-file within the assembler's current 64 GiB dm-zero origin. Source I/O failures
+file whose length, rounded up to 512-byte sectors, is at most ZERO_SIZE_SECTORS
+(2^53 sectors), the assembler's dm-zero origin size. Source I/O failures
 propagate; after a read failure, subsequent nonempty reads fail. Caller storage,
 publication, hashing, and persistence remain outside this API.
 

@@ -149,16 +149,6 @@ fn validates_source_and_propagates_second_pass_failure() {
     assert!(<Planned<File> as Plan>::plan(tempfile::tempfile().unwrap()).is_err());
     #[cfg(unix)]
     assert!(<Planned<File> as Plan>::plan(File::open(".").unwrap()).is_err());
-    // Unix set_len creates a sparse file without allocating 64 GiB.
-    #[cfg(unix)]
-    {
-        let file = tempfile::tempfile().unwrap();
-        file.set_len(crate::ZERO_COUNT_SECTORS * 512 + 1).unwrap();
-        assert!(<Planned<File> as Plan>::plan(file)
-            .unwrap_err()
-            .to_string()
-            .contains("64 GiB"));
-    }
     let file = source(&[1; BLOCK]);
     let mut planned = plan(file.try_clone().unwrap());
     // Mutation violates the contract, but truncation must surface as an error,
