@@ -242,6 +242,10 @@ mod async_tests {
     }
 }
 
-// Shared format geometry for image conversion and Linux assembly.
-#[cfg(any(target_os = "linux", feature = "image"))]
-pub(crate) const ZERO_COUNT_SECTORS: u64 = 64u64 * 1024 * 1024 * 1024 / 512;
+/// Size of the zero device beneath the base scute, in 512-byte sectors.
+pub const ZERO_SIZE_SECTORS: u64 = 1 << 53;
+
+/// Size of the zero device beneath the base scute, in bytes.
+pub const ZERO_SIZE_BYTES: u64 = ZERO_SIZE_SECTORS * 512;
+
+const _: () = assert!(ZERO_SIZE_BYTES == 1 << 62);

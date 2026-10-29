@@ -7,7 +7,8 @@
 //! [`Planned`] reader. Planning scans the source for nonzero chunks; streaming
 //! rereads the selected chunks and emits a base-scute COW stream.
 //!
-//! The source must be an immutable, nonempty regular file of at most 64 GiB.
+//! The source must be an immutable, nonempty regular file whose length, rounded
+//! up to 512-byte sectors, is at most [`crate::ZERO_SIZE_SECTORS`] (2^53 sectors).
 //! Do not mutate it or use duplicated handles during planning or reading.
 //! A partial final chunk is zero-padded to 4096 bytes. Sparse holes are skipped
 //! where supported; otherwise planning scans the entire source. Memory usage
@@ -148,8 +149,8 @@ impl Metadata {
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(invalid("expected a nonempty regular image file"));
         }
-        if metadata.len() > crate::ZERO_COUNT_SECTORS * 512 {
-            return Err(invalid("image exceeds the 64 GiB virtual origin"));
+        if metadata.len().div_ceil(512) > crate::ZERO_SIZE_SECTORS {
+            return Err(invalid("image exceeds the 2^53-sector virtual origin"));
         }
         let chunk_size = NonZero::new(BLOCK as u32)
             .and_then(BlockSize::from_bytes)

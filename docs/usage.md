@@ -158,8 +158,11 @@ io::copy(&mut scute, &mut File::create("base.cow")?)?;
 # Ok::<(), io::Error>(())
 ```
 
-The source must be a nonempty regular file of at most 64 GiB. Keep its contents
-unchanged and do not use duplicated handles during planning or reading.
+The source must be a nonempty regular file whose length, rounded up to
+512-byte sectors, is at most `ZERO_SIZE_SECTORS` (2^53 sectors). The library
+exposes both `ZERO_SIZE_SECTORS` and `ZERO_SIZE_BYTES` (2^62 bytes, 4 EiB)
+in every build. Keep the source contents unchanged and do not use duplicated
+handles during planning or reading.
 Planning scans for nonzero chunks, skipping sparse holes where supported;
 streaming rereads the selected chunks. With `tokio`, use `AsyncPlan` with a
 `tokio::fs::File` and consume the result through `AsyncRead`.
