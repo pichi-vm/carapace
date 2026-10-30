@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use carapace::{Assemble, Chain, FromGpt};
+use carapace::{Assemble, Chain, FromGpt, ZERO_SIZE_SECTORS};
 use devmap_core::{BlockSize, Geometry, Span};
 use devmap_linux::records::Records;
 use devmap_linux::{
@@ -21,7 +21,6 @@ use std::{
 
 const MIB: u64 = 1024 * 1024;
 const DATA_SIZE: u64 = 4 * MIB;
-const SECTORS: u64 = 64 * 1024 * MIB / 512;
 const BLOCK: u64 = 4096;
 const WRITES: usize = 32;
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -41,7 +40,7 @@ impl Mapping {
             removed: false,
         };
         let table = Table::<4096>::default().add(
-            Span::new(0, SECTORS),
+            Span::new(0, ZERO_SIZE_SECTORS),
             target,
             control.version(T::NAME)?,
         )?;
