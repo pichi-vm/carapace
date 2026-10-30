@@ -16,7 +16,7 @@ use devmap_snapshot::{
     Discard, Parameters as SnapshotParameters, Persistence, Persistent, Snapshot,
 };
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::{FileExt, FileTypeExt};
 
 #[derive(Debug)]
@@ -82,12 +82,30 @@ impl Chain {
         Ok(prepared)
     }
 
-    pub(crate) fn assemble_sync(&self) -> io::Result<File> {
+    pub(crate) fn assemble_sync(&self, private: bool) -> io::Result<File> {
         let prepared = self.prepare()?;
         let assembler = Assembler {
             control: Control::open()?,
         };
-        let mut origin = assembler.activate("CARAPACE-z", ZERO_SIZE_SECTORS, Zero)?;
+        let mut origin = if private {
+            let mut nonce = [0; 16];
+            File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+            // A separate zero device gives every snapshot a different origin,
+            // so neither mounted prefixes nor kernel snapshot handover alias.
+            // A name collision fails without adopting another caller's device.
+            let id = assembler
+                .control
+                .create(&format!("CARAPACE-z{}", hex_lower(&nonce)))?;
+            assembler.activate_created(
+                id,
+                ZERO_SIZE_SECTORS,
+                Zero,
+                #[cfg(test)]
+                &mut |_| Ok(()),
+            )?
+        } else {
+            assembler.activate("CARAPACE-z", ZERO_SIZE_SECTORS, Zero)?
+        };
         for (index, scute) in prepared.iter().enumerate() {
             origin = assembler
                 .scute(scute, origin, index)
@@ -220,6 +238,42 @@ impl Assembler {
         self.activate(&name, ZERO_SIZE_SECTORS, snapshot)
     }
 
+    fn activate_created<T>(
+        &self,
+        id: DevId,
+        sectors: u64,
+        target: T,
+        #[cfg(test)] observe: &mut impl FnMut(ActivationStage) -> io::Result<()>,
+    ) -> io::Result<File>
+    where
+        T: Target<Table = T>,
+    {
+        let rollback = Rollback::new(&self.control, id);
+        #[cfg(test)]
+        observe(ActivationStage::Created)?;
+        let version = self.control.version(T::NAME)?;
+        let table = Table::<4096>::default().add(Span::new(0, sectors), &target, version)?;
+        self.control.load(id, table, true)?;
+        self.control.suspend(id, false)?;
+        #[cfg(test)]
+        observe(ActivationStage::Resumed)?;
+        // Pin before scheduling removal. Shared publication keeps its lock
+        // until this returns, including rollback on any activation failure.
+        let file = match OpenOptions::new()
+            .read(true)
+            .open(format!("/dev/dm-{}", id.minor()))
+        {
+            Ok(file) => file,
+            Err(error) => return Err(rollback.fail(error)),
+        };
+        if let Err(error) = self.control.remove(id, true) {
+            drop(file);
+            return Err(rollback.fail(error));
+        }
+        rollback.disarm();
+        Ok(file)
+    }
+
     /// New mappings get rollback guards. Existing mappings are pinned and
     /// checked, never reloaded or put under an immediate-removal guard.
     fn activate<T>(&self, name: &str, sectors: u64, target: T) -> io::Result<File>
@@ -254,32 +308,13 @@ impl Assembler {
         for _ in 0..8 {
             match self.control.create(name) {
                 Ok(id) => {
-                    let rollback = Rollback::new(&self.control, id);
-                    #[cfg(test)]
-                    observe(ActivationStage::Created)?;
-                    let version = self.control.version(T::NAME)?;
-                    let table =
-                        Table::<4096>::default().add(Span::new(0, sectors), &target, version)?;
-                    self.control.load(id, table, true)?;
-                    self.control.suspend(id, false)?;
-                    #[cfg(test)]
-                    observe(ActivationStage::Resumed)?;
-                    // Keep exclusion until the file pins the mapping and the
-                    // rollback guard is disarmed. On error, guard cleanup runs
-                    // before the earlier-declared lock file closes.
-                    let file = match OpenOptions::new()
-                        .read(true)
-                        .open(format!("/dev/dm-{}", id.minor()))
-                    {
-                        Ok(file) => file,
-                        Err(error) => return Err(rollback.fail(error)),
-                    };
-                    if let Err(error) = self.control.remove(id, true) {
-                        drop(file);
-                        return Err(rollback.fail(error));
-                    }
-                    rollback.disarm();
-                    return Ok(file);
+                    return self.activate_created(
+                        id,
+                        sectors,
+                        target,
+                        #[cfg(test)]
+                        observe,
+                    );
                 }
                 Err(error)
                     if matches!(

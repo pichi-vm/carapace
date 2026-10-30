@@ -88,12 +88,23 @@ pub trait Assemble {
     /// or another kernel holder retains it. Closing the last holder permits
     /// teardown of the stack. Device identity is available through metadata.
     fn assemble(&self) -> io::Result<std::fs::File>;
+
+    /// Assemble separate snapshot mappings for this caller. Use this when a
+    /// chain or one of its prefixes may already be mounted: Linux cannot stack
+    /// another block-device target over a filesystem's mounted device.
+    /// Verity mappings may still be shared. The returned file has the same
+    /// read-only verification and deferred-removal lifetime as `assemble`.
+    fn assemble_private(&self) -> io::Result<std::fs::File>;
 }
 
 #[cfg(target_os = "linux")]
 impl Assemble for Chain {
     fn assemble(&self) -> io::Result<std::fs::File> {
-        self.assemble_sync()
+        self.assemble_sync(false)
+    }
+
+    fn assemble_private(&self) -> io::Result<std::fs::File> {
+        self.assemble_sync(true)
     }
 }
 

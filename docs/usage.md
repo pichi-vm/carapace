@@ -53,6 +53,13 @@ The file supports ordinary reads, seeks, metadata, and FD-based consumers.
 `DevId::try_from(device.metadata()?)` obtains its device number without closing
 it. Import `Assemble` to call the synchronous `assemble` trait method.
 
+Use `assemble_private()` when a chain or one of its prefixes may already be
+mounted, for example when deriving a new image from the running appliance.
+Linux rejects a new block-device target over a device held by a filesystem.
+Private assembly creates a separate zero origin and snapshot chain while
+retaining shared verity mappings and the same validation and file lifetime.
+It does not copy or modify the input data.
+
 The library imposes no maximum number of scutes. Discovery still rejects
 cycles, and assembly requires at least one scute. Resource limits are the
 caller’s policy; operating-system resource constraints still apply.

@@ -184,16 +184,18 @@ fn failure_after_creating_a_lower_scute_cleans_up() {
         scutes: chain.scutes.iter().map(clone_scute).collect(),
     };
     wrong.root[0] ^= 1;
-    assert!(wrong.assemble().is_err());
-    torn_down();
-    // A failed second assembly must not tear down another caller's stack.
-    let good = chain.assemble().unwrap();
-    assert!(wrong.assemble().is_err());
-    with_mounted(&node(&good), |mount| {
-        assert!(mount.join("scute1.txt").exists());
-    });
-    drop(good);
-    torn_down();
+    for assemble in [Chain::assemble, Chain::assemble_private] {
+        assert!(assemble(&wrong).is_err());
+        torn_down();
+        // A failed second assembly must not tear down another caller's stack.
+        let good = chain.assemble().unwrap();
+        assert!(assemble(&wrong).is_err());
+        with_mounted(&node(&good), |mount| {
+            assert!(mount.join("scute1.txt").exists());
+        });
+        drop(good);
+        torn_down();
+    }
 }
 
 #[cfg(feature = "loop")]
@@ -237,6 +239,16 @@ fn file_backed_scutes_autoclear_on_last_close() {
 #[test]
 #[serial]
 fn writable_snapshot_keeps_origin_immutable_and_alive() {
+    if !available() {
+        return;
+    }
+    let (_dir, _attached, chain) = fixture(1);
+    writable_snapshot(chain.assemble().unwrap());
+    torn_down();
+}
+
+#[cfg(feature = "loop")]
+fn writable_snapshot(origin: File) {
     use devmap_core::{BlockSize, Span};
     use devmap_linux::targets::Target;
     use devmap_linux::Table;
@@ -244,11 +256,6 @@ fn writable_snapshot_keeps_origin_immutable_and_alive() {
         Discard, Parameters as SnapshotParameters, Persistence, Persistent, Snapshot,
     };
 
-    if !available() {
-        return;
-    }
-    let (_dir, _attached, chain) = fixture(1);
-    let origin = chain.assemble().unwrap();
     let mut original = [0; 4096];
     origin.read_exact_at(&mut original, 4096).unwrap();
     let backing = tempfile::tempfile().unwrap();
@@ -303,7 +310,45 @@ fn writable_snapshot_keeps_origin_immutable_and_alive() {
     assert_eq!(actual, original);
     drop(retained_origin);
     drop(writable);
-    torn_down();
+}
+
+#[cfg(feature = "loop")]
+#[test]
+#[serial]
+fn private_assembly_can_extend_a_mounted_chain() {
+    if !available() {
+        return;
+    }
+    let (_dir, _attached, chain) = fixture(2);
+    let mut parent_root = [0; 32];
+    chain.scutes[1]
+        .hash
+        .read_exact_at(&mut parent_root, 88)
+        .unwrap();
+    let parent = Chain {
+        root: parent_root.into(),
+        scutes: chain.scutes[..1].iter().map(clone_scute).collect(),
+    };
+    // A mounted input can be either the whole chain or one of its prefixes.
+    for mounted_chain in [&parent, &chain] {
+        let mounted = mounted_chain.assemble().unwrap();
+        let expected = if mounted_chain.scutes.len() == 1 {
+            "scute0 content\n"
+        } else {
+            "modified by scute1\n"
+        };
+        with_mounted(&node(&mounted), |mount| {
+            let private = chain.assemble_private().unwrap();
+            assert_ne!(node(&private), node(&mounted));
+            writable_snapshot(private);
+            assert_eq!(
+                std::fs::read_to_string(mount.join("scute0.txt")).unwrap(),
+                expected
+            );
+        });
+        drop(mounted);
+        torn_down();
+    }
 }
 
 #[cfg(feature = "tokio")]
