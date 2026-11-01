@@ -10,9 +10,12 @@
 //! Only 512-byte sectors and GPT 1.0 with 128-byte entries are supported.
 
 mod architecture;
+mod bounded;
+mod layout;
 mod partition;
 
 pub use architecture::Architecture;
+pub use layout::Layout;
 pub use partition::Partition;
 
 use gpt::{disk::LogicalBlockSize, header::Header};

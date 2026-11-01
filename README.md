@@ -72,6 +72,15 @@ Multiple matching partitions are errors, and no-auto partitions are excluded.
 The reader supports GPT 1.0, 128-byte entries, and at most 8192 entries per
 table. It neither probes filesystems nor changes the existing CLI's mounts.
 
+`disk::Layout::new(architecture, root_bytes, esp_bytes)` plans a new layout,
+with an optional ESP before the root. Both partitions start on 1 MiB boundaries;
+capacities must be positive multiples of 4096 bytes. `Layout::bytes()` includes
+alignment and partition-table overhead. `Layout::write(&mut output, capacity)`
+writes both GPT copies with fresh disk and partition UUIDs and validates the
+result through the same reader. It preserves partition contents and bytes
+beyond the logical disk. Format the selected partitions separately and discard
+the new output if writing or formatting fails.
+
 ## CLI
 
 ```sh

@@ -37,6 +37,12 @@ CI also exercises every combination of the `gpt`, `loop`, and `tokio` features,
 the portable `disk` feature without Linux discovery,
 checks dependency policy with cargo-deny, and checks SPDX headers with Hawkeye.
 
+The disk layout interoperability test uses `sgdisk` without mount privileges:
+
+```sh
+cargo test --locked --features disk --test disk -- --ignored
+```
+
 ## Integration tests
 
 Kernel integration tests require Linux, root, loop devices, device-mapper,

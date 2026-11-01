@@ -113,6 +113,7 @@ jobs:
           cargo test --locked --all-features --lib --bins
           cargo check --locked --no-default-features --all-targets
           cargo doc --locked --all-features --no-deps
+          cargo test --locked --features disk --test disk -- --ignored
       # Integration tests build a real layered ext4 carapace and need root
       # (loop devices, device-mapper). Run as root with the runner user's
       # cargo/rustup env so the toolchain resolves under sudo.
