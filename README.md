@@ -22,6 +22,10 @@ falling back to sequential scanning otherwise; the resulting COW bytes are ident
 
 Discovery, device-mapper assembly, loop attachment, and the CLI require Linux.
 
+The optional `disk` feature reads partitioned disk images on all platforms.
+It is independent of the `gpt` feature, which discovers the outer scute
+partitions exposed by the Linux kernel.
+
 ## Library API
 
 ```rust,no_run
@@ -49,6 +53,24 @@ Assembly is synchronous; async callers can run it with `spawn_blocking`.
 
 See the [usage guide](docs/usage.md) for the full API, async
 cancellation contract, writable snapshot example, and tests.
+
+## Partitioned roots
+
+With `disk`, `disk::Disk::read(&mut source, capacity)` validates a GPT disk
+stored at the start of a file or assembled carapace. Pass the file length for
+a standalone image or `ZERO_SIZE_BYTES` for an assembled device. The primary
+header identifies the bounded disk's final sector; the remainder of a larger
+backing device is outside that disk. Both headers and partition tables must
+agree. Invalid checksums, overlapping partitions, duplicate identifiers and
+out-of-bounds metadata are rejected without attempting repair.
+
+`Disk::root(Architecture::X86_64)` or `Architecture::Aarch64` selects the native
+root by its Discoverable Partitions Specification type. `Disk::esp()` selects
+an optional EFI System Partition. Each returns a `Partition` extent in
+512-byte sectors; the caller creates and owns any device view or mount.
+Multiple matching partitions are errors, and no-auto partitions are excluded.
+The reader supports GPT 1.0, 128-byte entries, and at most 8192 entries per
+table. It neither probes filesystems nor changes the existing CLI's mounts.
 
 ## CLI
 

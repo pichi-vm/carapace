@@ -34,6 +34,7 @@ bash ci/grep-unsafe.sh
 ```
 
 CI also exercises every combination of the `gpt`, `loop`, and `tokio` features,
+the portable `disk` feature without Linux discovery,
 checks dependency policy with cargo-deny, and checks SPDX headers with Hawkeye.
 
 ## Integration tests

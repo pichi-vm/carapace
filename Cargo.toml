@@ -16,6 +16,8 @@ path = "src/main.rs"
 default = ["gpt"]
 # GPT/PARTUUID discovery: `Chain::from_gpt` scans block-device PARTUUIDs.
 gpt = []
+# Bounded partitioned disk images inside an assembled carapace.
+disk = ["dep:gpt"]
 # File-backed scutes: loop-attach `data`/`hash` files via lodown.
 loop = ["dep:lodown"]
 # Async discovery adapter (with gpt); the default build needs no runtime.
@@ -29,6 +31,7 @@ devmap-core = { git = "https://github.com/pichi-vm/devmap.git", rev = "3a2728f61
 devmap-snapshot = { git = "https://github.com/pichi-vm/devmap.git", rev = "3a2728f617e9272be5224bbf76ffc4deafdfe83b" }
 devmap-verity = { git = "https://github.com/pichi-vm/devmap.git", rev = "3a2728f617e9272be5224bbf76ffc4deafdfe83b" }
 tokio = { version = "1", features = ["rt", "fs", "io-util"], optional = true }
+gpt = { version = "4.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"], optional = true }

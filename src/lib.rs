@@ -33,6 +33,8 @@
 mod assemble;
 #[cfg(all(target_os = "linux", feature = "gpt"))]
 mod chain;
+#[cfg(feature = "disk")]
+pub mod disk;
 #[cfg(feature = "image")]
 pub mod image;
 #[cfg(all(target_os = "linux", feature = "gpt"))]
