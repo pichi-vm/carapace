@@ -149,6 +149,54 @@ impl BuiltChain {
     }
 }
 
+/// Own the shell builder's backing files until all its loop devices detach.
+/// The child's EXIT trap removes mounts and dm layers before this guard runs,
+/// including when the child fails and build_chain panics.
+struct FixtureBuilder {
+    work: tempfile::TempDir,
+}
+
+impl FixtureBuilder {
+    fn detach(&self) -> io::Result<()> {
+        for entry in std::fs::read_dir(self.work.path())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let loops = Command::new("losetup")
+                .args(["--associated"])
+                .arg(entry.path())
+                .output()?;
+            if !loops.status.success() {
+                return Err(io::Error::other(String::from_utf8_lossy(&loops.stderr)));
+            }
+            for line in String::from_utf8_lossy(&loops.stdout).lines() {
+                let (device, _) = line.split_once(':').expect("losetup device line");
+                let status = Command::new("losetup").args(["-d", device]).status()?;
+                if !status.success() {
+                    return Err(io::Error::other(format!("detach {device}: {status}")));
+                }
+                if loop_bound_to(&entry.path(), Duration::from_secs(5)) {
+                    return Err(io::Error::other(format!("{device} is still attached")));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FixtureBuilder {
+    fn drop(&mut self) {
+        if let Err(error) = self.detach() {
+            if std::thread::panicking() {
+                eprintln!("fixture loop cleanup failed: {error}");
+            } else {
+                panic!("fixture loop cleanup failed: {error}");
+            }
+        }
+    }
+}
+
 /// Build a carapace image with `n_scutes` scutes (>= 1).
 ///
 /// Spawns `tests/fixtures/build_carapace.sh` and parses its stdout.
@@ -156,10 +204,17 @@ impl BuiltChain {
 pub(crate) fn build_chain(image: &Path, n_scutes: usize) -> BuiltChain {
     assert!((1..=16).contains(&n_scutes));
 
+    let builder = FixtureBuilder {
+        work: tempfile::Builder::new()
+            .prefix("carapace-fixture-")
+            .tempdir_in(image.parent().expect("fixture image directory"))
+            .expect("fixture workspace"),
+    };
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/build_carapace.sh");
     let out = Command::new(&script)
         .arg(image)
         .arg(n_scutes.to_string())
+        .arg(builder.work.path())
         .output()
         .unwrap_or_else(|e| panic!("spawn {}: {e}", script.display()));
     assert!(
