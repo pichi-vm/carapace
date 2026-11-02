@@ -120,7 +120,7 @@ jobs:
       # compile as the runner user so the Rust cache remains readable.
       - name: Integration tests (root)
         env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n python3 ci/check-test-loops.py
         run: |
           cargo test --locked --all-features --tests -- --test-threads=1
           cargo test --locked --all-features --lib image::tests::kernel_reads_planned_scute -- --ignored --test-threads=1
