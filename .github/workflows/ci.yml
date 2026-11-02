@@ -120,11 +120,11 @@ jobs:
           sudo env "PATH=$PATH" "HOME=$HOME" \
             "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
             "RUSTFLAGS=-D warnings" \
-            cargo test --locked --all-features --tests -- --test-threads=1
+            python3 ci/check-test-loops.py cargo test --locked --all-features --tests -- --test-threads=1
           sudo env "PATH=$PATH" "HOME=$HOME" \
             "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
             "RUSTFLAGS=-D warnings" \
-            cargo test --locked --all-features --lib image::tests::kernel_reads_planned_scute -- --ignored --test-threads=1
+            python3 ci/check-test-loops.py cargo test --locked --all-features --lib image::tests::kernel_reads_planned_scute -- --ignored --test-threads=1
       - name: Block-device benchmark smoke test (root)
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n
