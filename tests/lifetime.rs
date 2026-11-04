@@ -381,3 +381,45 @@ fn conflicting_mapping_is_rejected_without_reloading_or_removing_it() {
     cleanup.disarm();
     torn_down();
 }
+
+#[test]
+#[serial]
+fn fixture_loops_detach_on_success_and_unwind() {
+    if !available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let built = build_chain(&dir.path().join("unrelated"), 1);
+    let attached = AttachedImage::attach(&built.image);
+    let chain = Chain::from_gpt(&decode_hex(&built.trusted_root_hex).unwrap()).unwrap();
+    let device = chain.assemble().unwrap();
+    let invalid = dir.path().join("directory");
+    std::fs::create_dir(&invalid).unwrap();
+    with_mounted(&node(&device), |mount| {
+        for (image, succeeds) in [(dir.path().join("normal"), true), (invalid, false)] {
+            // Catch inside the callback so the existing mount helper can
+            // unmount normally after the failed builder's guard unwinds.
+            let result = std::panic::catch_unwind(|| build_chain(&image, 2));
+            let loops = std::process::Command::new("losetup")
+                .args(["--list", "--noheadings", "--raw", "--output", "BACK-FILE"])
+                .output()
+                .unwrap();
+            assert!(loops.status.success());
+            let prefix = format!("{}/carapace-fixture-", dir.path().display());
+            assert!(
+                !String::from_utf8_lossy(&loops.stdout)
+                    .lines()
+                    .any(|backing| backing.starts_with(&prefix)),
+                "fixture loops remain after builder cleanup"
+            );
+            assert_eq!(result.is_ok(), succeeds);
+            assert!(common::loop_bound_to(&built.image, Duration::ZERO));
+            assert!(mount.join("scute0.txt").is_file());
+        }
+    });
+    drop(device);
+    drop(chain);
+    torn_down();
+    drop(attached);
+    assert!(!common::loop_bound_to(&built.image, Duration::from_secs(5)));
+}
