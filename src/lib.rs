@@ -60,14 +60,18 @@ pub struct Scute {
     pub data: File,
     /// Open, readable block device or regular file containing the hash tree.
     pub hash: File,
+    /// Verification parameters retained by the caller alongside the trusted root.
+    /// When present, assembly uses these instead of the mutable hash superblock.
+    /// `None` rereads and validates the file header, as GPT discovery does.
+    pub trusted_parameters: Option<devmap_verity::Parameters>,
 }
 
 /// An ordered chain of scutes, base → top, plus the operator-supplied
 /// trusted root hash. Produced by `FromGpt::from_gpt` or constructed
 /// directly from caller-opened files. The library imposes no chain-depth limit.
 /// Inputs remain open until the chain is
-/// dropped. Assembly rereads their headers using positional I/O; it neither
-/// trusts discovery-time validation nor changes the input file offsets.
+/// dropped. Assembly validates caller-retained parameters when supplied, otherwise
+/// rereading file headers using positional I/O. It does not change file offsets.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct Chain {

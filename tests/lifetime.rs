@@ -38,6 +38,7 @@ fn clone_scute(scute: &carapace::Scute) -> carapace::Scute {
     carapace::Scute {
         data: scute.data.try_clone().unwrap(),
         hash: scute.hash.try_clone().unwrap(),
+        trusted_parameters: scute.trusted_parameters,
     }
 }
 
@@ -219,6 +220,7 @@ fn file_backed_scutes_autoclear_on_last_close() {
     chain.scutes[0] = carapace::Scute {
         data: File::open(&data).unwrap(),
         hash: File::open(&hash).unwrap(),
+        trusted_parameters: None,
     };
     drop(attached);
     let first = chain.assemble().unwrap();

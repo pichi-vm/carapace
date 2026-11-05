@@ -29,9 +29,19 @@ struct PreparedScute<'a> {
 
 impl<'a> PreparedScute<'a> {
     fn read(scute: &'a Scute, root: &[u8], index: usize) -> io::Result<Self> {
-        let mut record = [0; VERITY_SUPERBLOCK_SIZE];
-        scute.hash.read_exact_at(&mut record, 0)?;
-        let superblock = ValidatedVeritySuperblock::parse(&record, index)?;
+        let superblock = if let Some(parameters) = scute.trusted_parameters {
+            ValidatedVeritySuperblock::new(
+                &devmap_verity::Header {
+                    uuid: [0; 16],
+                    parameters,
+                },
+                index,
+            )?
+        } else {
+            let mut record = [0; VERITY_SUPERBLOCK_SIZE];
+            scute.hash.read_exact_at(&mut record, 0)?;
+            ValidatedVeritySuperblock::parse(&record, index)?
+        };
         Ok(Self {
             data: &scute.data,
             hash: &scute.hash,
@@ -561,6 +571,7 @@ mod tests {
         Scute {
             data: File::open(data).unwrap(),
             hash: File::open(hash).unwrap(),
+            trusted_parameters: None,
         }
     }
 
@@ -616,6 +627,57 @@ mod tests {
             .open(dir.path().join("hash-0"))
             .unwrap();
         writer.write_all_at(b"badmagic", 0).unwrap();
+        assert_eq!(
+            chain.prepare().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn preparation_keeps_retained_geometry_and_parent_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut top = scute(dir.path(), 1, "sha256", &[1; 32]);
+        let mut record = [0; VERITY_SUPERBLOCK_SIZE];
+        top.hash.read_exact_at(&mut record, 0).unwrap();
+        let parameters = devmap_verity::Header::decode(record).unwrap().parameters;
+        top.trusted_parameters = Some(parameters);
+        let mut chain = Chain {
+            root: vec![2; 32].into(),
+            scutes: vec![scute(dir.path(), 0, "sha256", &[0; 32]), top],
+        };
+        let writer = OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("hash-1"))
+            .unwrap();
+        writer.write_all_at(&9u64.to_le_bytes(), 72).unwrap();
+        writer.write_all_at(&[9; 32], 88).unwrap();
+        let prepared = chain.prepare().unwrap();
+        assert_eq!(prepared[1].superblock.header.parameters.data.count.get(), 1);
+        assert_eq!(prepared[1].superblock.full_salt(), &[1; 32]);
+        assert_eq!(&*prepared[0].root, &[1; 32]);
+        // Even an unreadable external header cannot replace retained authority.
+        writer.set_len(0).unwrap();
+        chain.prepare().unwrap();
+        chain.scutes[1].trusted_parameters = None;
+        assert_eq!(
+            chain.prepare().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn retained_parameters_still_require_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut input = scute(dir.path(), 0, "sha256", &[0; 32]);
+        let mut record = [0; VERITY_SUPERBLOCK_SIZE];
+        input.hash.read_exact_at(&mut record, 0).unwrap();
+        let mut parameters = devmap_verity::Header::decode(record).unwrap().parameters;
+        parameters.hash_type = devmap_verity::HashType::ChromeOs;
+        input.trusted_parameters = Some(parameters);
+        let chain = Chain {
+            root: vec![1; 32].into(),
+            scutes: vec![input],
+        };
         assert_eq!(
             chain.prepare().unwrap_err().kind(),
             io::ErrorKind::InvalidData

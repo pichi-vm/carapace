@@ -31,6 +31,17 @@ impl ValidatedVeritySuperblock {
             .ok_or_else(|| invalid("short verity superblock".into()))?;
         let header = Header::decode(record.try_into().unwrap())
             .map_err(|error| invalid(error.to_string()))?;
+        Self::new(&header, scute_index)
+    }
+
+    /// Apply the same profile to decoded or caller-retained parameters.
+    pub(crate) fn new(header: &Header, scute_index: usize) -> io::Result<Self> {
+        let invalid = |reason: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("scute {scute_index}: {reason}"),
+            )
+        };
         let algorithm = algorithm::parse(header.parameters.algorithm.as_ref())
             .map_err(|error| invalid(error.to_string()))?;
         if header.parameters.hash_type != HashType::Normal {
@@ -54,7 +65,10 @@ impl ValidatedVeritySuperblock {
         {
             return Err(invalid("data_blocks * 4096 overflows u64".into()));
         }
-        Ok(Self { algorithm, header })
+        Ok(Self {
+            algorithm,
+            header: *header,
+        })
     }
 
     pub(crate) fn full_salt(&self) -> &[u8] {

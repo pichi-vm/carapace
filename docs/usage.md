@@ -10,11 +10,16 @@ macOS, and Windows. The format is specified in [spec.md](spec.md).
 
 ## Library API
 
-Discovery returns a `Chain`: an owned root and a list of `Scute { data, hash }`
-open files, ordered base to top. Callers can construct scutes directly with
-`Scute { data: File::open(data_path)?, hash: File::open(hash_path)? }`.
-Discovery retains the files it inspected; assembly independently rereads and
-validates their headers with positional I/O, preserving all input offsets.
+Discovery returns a `Chain`: an owned root and a list of scutes ordered base
+to top. Direct construction accepts
+`Scute { data: File::open(data_path)?, hash: File::open(hash_path)?, trusted_parameters: None }`.
+With `None`, assembly independently rereads and validates file headers using
+positional I/O. A caller retaining authoritative verity parameters alongside
+its trusted root can supply `Some(parameters)` instead. Assembly validates
+that profile and uses the retained parameters without reading the mutable
+hash superblock; dm-verity still verifies data and tree reads against the root.
+The tree must retain the normal header-block offset. Both modes preserve
+input file offsets.
 
 `Chain` and `Scute` implement `Debug`; duplicating their file handles is explicit.
 They retain two file descriptors per scute until dropped, which can prolong

@@ -315,21 +315,55 @@ fn async_constructor_is_send_and_lazy() {
 fn kernel_reads_planned_scute() {
     use crate::Assemble as _;
     use std::io::Seek as _;
+    use std::os::unix::fs::FileExt as _;
     let bytes = fixture(257);
-    let planned = plan(source(&bytes));
-    let mut cow = tempfile::tempfile().unwrap();
-    let mut hash = tempfile::tempfile().unwrap();
-    let root =
-        devmap_verity::Format::format(verity(planned.size()), Tee(planned, &mut cow), &mut hash)
-            .unwrap();
-    cow.rewind().unwrap();
-    hash.rewind().unwrap();
-    let chain = crate::Chain {
-        root,
-        scutes: vec![crate::Scute { data: cow, hash }],
-    };
-    let mut device = chain.assemble().unwrap();
-    let mut actual = vec![0; bytes.len()];
-    device.read_exact(&mut actual).unwrap();
-    assert_eq!(actual, bytes);
+    for (retained, data_corruption, hash_corruption) in [
+        (false, None, None),
+        (true, None, None),
+        (true, Some(4096), None), // COW metadata
+        (true, Some(8192), None), // COW data
+        (true, None, Some(4096)), // required verity tree block
+    ] {
+        let planned = plan(source(&bytes));
+        let mut cow = tempfile::tempfile().unwrap();
+        let mut hash = tempfile::tempfile().unwrap();
+        let header = verity(planned.size());
+        let root =
+            devmap_verity::Format::format(header, Tee(planned, &mut cow), &mut hash).unwrap();
+        if retained {
+            // The mutable superblock is not an authority for prepared inputs.
+            hash.write_all_at(&[0x5a; 512], 0).unwrap();
+        }
+        for (file, offset) in [(&cow, data_corruption), (&hash, hash_corruption)] {
+            if let Some(offset) = offset {
+                let mut byte = [0];
+                file.read_exact_at(&mut byte, offset).unwrap();
+                byte[0] ^= 0x80;
+                file.write_all_at(&byte, offset).unwrap();
+            }
+        }
+        cow.rewind().unwrap();
+        hash.rewind().unwrap();
+        let chain = crate::Chain {
+            root,
+            scutes: vec![crate::Scute {
+                data: cow,
+                hash,
+                trusted_parameters: retained.then_some(header.parameters),
+            }],
+        };
+        let mut actual = vec![0; bytes.len()];
+        let read = chain
+            .assemble()
+            .and_then(|mut device| device.read_exact(&mut actual));
+        if data_corruption.is_some() || hash_corruption.is_some() {
+            assert!(
+                read.is_err(),
+                "corrupt prepared bytes must fail verification"
+            );
+        } else {
+            read.unwrap();
+            assert_eq!(actual, bytes);
+        }
+    }
 }

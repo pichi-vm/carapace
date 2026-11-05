@@ -37,8 +37,10 @@ fn attach(root: &[u8]) -> std::io::Result<std::fs::File> {
 ```
 
 `Chain` can also be constructed directly from a trusted root and ordered
-`Scute { data, hash }` open files, base to top. Assembly independently
-validates the retained inputs without changing their file offsets. It returns a read-only file
+`Scute { data, hash, trusted_parameters: None }` open files, base to top.
+Callers retaining authoritative verity parameters can supply them in
+`trusted_parameters`; assembly then uses them instead of the file superblock.
+Both paths enforce the same profile and preserve file offsets. It returns a read-only file
 with deferred removal already scheduled. The file, clones, mounts, and upper
 mappings retain the stack until their last holder closes.
 

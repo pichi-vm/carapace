@@ -110,7 +110,11 @@ pub(crate) fn walk_chain(
         }
 
         let is_base = superblock.is_base();
-        scutes_top_down.push(Scute { data, hash });
+        scutes_top_down.push(Scute {
+            data,
+            hash,
+            trusted_parameters: None,
+        });
 
         if is_base {
             break;
