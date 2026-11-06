@@ -116,19 +116,14 @@ jobs:
           cargo test --locked --all-features --lib --bins
           cargo check --locked --no-default-features --all-targets
           cargo doc --locked --all-features --no-deps
-      # Integration tests build a real layered ext4 carapace and need root
-      # (loop devices, device-mapper). Run as root with the runner user's
-      # cargo/rustup env so the toolchain resolves under sudo.
+      # Run integration binaries as root for loop devices and device-mapper;
+      # compile as the runner user so the Rust cache remains readable.
       - name: Integration tests (root)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n
         run: |
-          sudo env "PATH=$PATH" "HOME=$HOME" \
-            "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
-            "RUSTFLAGS=-D warnings" \
-            cargo test --locked --all-features --tests -- --test-threads=1
-          sudo env "PATH=$PATH" "HOME=$HOME" \
-            "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
-            "RUSTFLAGS=-D warnings" \
-            cargo test --locked --all-features --lib image::tests::kernel_reads_planned_scute -- --ignored --test-threads=1
+          cargo test --locked --all-features --tests -- --test-threads=1
+          cargo test --locked --all-features --lib image::tests::kernel_reads_planned_scute -- --ignored --test-threads=1
       - name: Block-device benchmark smoke test (root)
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n
