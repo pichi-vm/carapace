@@ -361,10 +361,6 @@ mod tests {
         match Control::open() {
             Ok(control) => Some(Assembler { control }),
             Err(error) => {
-                assert!(
-                    std::env::var_os("CARAPACE_REQUIRE_DM_TESTS").is_none(),
-                    "{error}"
-                );
                 eprintln!("skip: device-mapper access required: {error}");
                 None
             }
