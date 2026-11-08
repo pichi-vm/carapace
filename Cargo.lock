@@ -248,7 +248,7 @@ dependencies = [
 [[package]]
 name = "devmap-core"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=3a2728f617e9272be5224bbf76ffc4deafdfe83b#3a2728f617e9272be5224bbf76ffc4deafdfe83b"
+source = "git+https://github.com/pichi-vm/devmap.git?branch=main#19a368a0083ad0cbe92e6a5b65e0bb5761f8616c"
 dependencies = [
  "iocuddle 0.4.0",
 ]
@@ -256,7 +256,7 @@ dependencies = [
 [[package]]
 name = "devmap-linux"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=3a2728f617e9272be5224bbf76ffc4deafdfe83b#3a2728f617e9272be5224bbf76ffc4deafdfe83b"
+source = "git+https://github.com/pichi-vm/devmap.git?branch=main#19a368a0083ad0cbe92e6a5b65e0bb5761f8616c"
 dependencies = [
  "devmap-core",
  "iocuddle 0.4.0",
@@ -266,7 +266,7 @@ dependencies = [
 [[package]]
 name = "devmap-snapshot"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=3a2728f617e9272be5224bbf76ffc4deafdfe83b#3a2728f617e9272be5224bbf76ffc4deafdfe83b"
+source = "git+https://github.com/pichi-vm/devmap.git?branch=main#19a368a0083ad0cbe92e6a5b65e0bb5761f8616c"
 dependencies = [
  "devmap-core",
  "devmap-linux",
@@ -275,7 +275,7 @@ dependencies = [
 [[package]]
 name = "devmap-verity"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devmap.git?rev=3a2728f617e9272be5224bbf76ffc4deafdfe83b#3a2728f617e9272be5224bbf76ffc4deafdfe83b"
+source = "git+https://github.com/pichi-vm/devmap.git?branch=main#19a368a0083ad0cbe92e6a5b65e0bb5761f8616c"
 dependencies = [
  "devmap-core",
  "devmap-linux",
@@ -469,7 +469,7 @@ dependencies = [
 [[package]]
 name = "lodown"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/lodown.git?rev=31f8951293af180150e5e4c654c47a5b190097b9#31f8951293af180150e5e4c654c47a5b190097b9"
+source = "git+https://github.com/pichi-vm/lodown.git?branch=main#e7645d9534462b9a76ea3a06865a305c448e0e46"
 dependencies = [
  "iocuddle 0.3.0",
  "zerocopy",
