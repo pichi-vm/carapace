@@ -15,7 +15,7 @@
 # against (a) cryptsetup's veritysetup, (b) sgdisk's GPT writer, and
 # (c) the kernel's own dm-snapshot persistent-store implementation.
 #
-# Usage:   build_carapace.sh <image_path> <n_scutes>
+# Usage:   build_carapace.sh <image_path> <n_scutes> <work_dir>
 # Stdout:  trusted root hex (the top scute's root)
 # Stderr:  progress lines, prefixed with "[fixture]"
 #
@@ -23,8 +23,8 @@
 
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-    echo "usage: $0 <image_path> <n_scutes>" >&2
+if [ "$#" -ne 3 ]; then
+    echo "usage: $0 <image_path> <n_scutes> <work_dir>" >&2
     exit 64
 fi
 IMAGE="$1"
@@ -62,15 +62,16 @@ GPT_ALIGN=2048                               # 1 MiB partition alignment
 DATA_PART_BYTES="$DATA_BYTES"
 HASH_PART_BYTES="$HASH_BYTES"
 
-WORK="$(mktemp -d -t carapace-fixture-XXXXXX)"
+# The Rust FixtureBuilder owns this directory and detaches its loops on Drop.
+# This process tears down mounts and dm devices before returning to that guard.
+WORK="$3"
 PREFIX="cf$$"   # dm name prefix (process-unique)
 declare -a CLEANUP_MOUNTS=()
 declare -a CLEANUP_DM=()        # dm device short names (we'll prefix at remove)
-declare -a CLEANUP_LOOPS=()
 
 cleanup() {
     set +e
-    local m d l k
+    local m d k
     # mounts first, in reverse
     for ((k=${#CLEANUP_MOUNTS[@]}-1; k>=0; k--)); do
         m="${CLEANUP_MOUNTS[$k]:-}"
@@ -81,11 +82,6 @@ cleanup() {
         d="${CLEANUP_DM[$k]:-}"
         [ -n "$d" ] && dmsetup remove -f "$PREFIX-$d" 2>/dev/null
     done
-    # then loops
-    for l in "${CLEANUP_LOOPS[@]:-}"; do
-        [ -n "$l" ] && losetup -d "$l" 2>/dev/null
-    done
-    rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -107,15 +103,6 @@ PY
 
 DATA_TYPE_UUID="$(raw_to_uuid "$SCUTE_DATA_RAW")"
 HASH_TYPE_UUID="$(raw_to_uuid "$SCUTE_HASH_RAW")"
-
-attach_loop() {
-    # echo loop path
-    local file="$1"
-    local lo
-    lo="$(losetup --show -f "$file")"
-    CLEANUP_LOOPS+=("$lo")
-    echo "$lo"
-}
 
 dm_create() {
     # dm_create <short-name> <table-line>
@@ -164,7 +151,7 @@ build_ro_stack() {
 
 # Tear down whatever build_ro_stack put on top, plus a trailing writable
 # snapshot if present. Walks CLEANUP_DM from the end until empty, but
-# preserves CLEANUP_LOOPS (those persist across scutes).
+# leaves loops attached (those persist across scutes).
 teardown_dm() {
     local d k
     for ((k=${#CLEANUP_DM[@]}-1; k>=0; k--)); do
@@ -194,7 +181,7 @@ for ((i=0; i<N; i++)); do
     echo "[fixture] scute $i: building..." >&2
 
     # 2a. attach this scute's data file as a loop dev
-    data_loop="$(attach_loop "${DATA_FILES[$i]}")"
+    data_loop="$(losetup --show -f "${DATA_FILES[$i]}")"
     DATA_LOOPS[i]="$data_loop"
 
     # 2b. assemble the read-only stack of the chain so far [0..i-1]
@@ -234,8 +221,6 @@ for ((i=0; i<N; i++)); do
 
     # The data loop is no longer in use by dm; detach.
     losetup -d "$data_loop"
-    # Remove from CLEANUP_LOOPS to avoid double-detach on EXIT.
-    CLEANUP_LOOPS=("${CLEANUP_LOOPS[@]/$data_loop}")
 
     # 2f. compute salt for THIS scute and run veritysetup format on its
     # populated data file. Salt = parent root for i>0; deterministic random
@@ -274,9 +259,9 @@ print((zero + suffix).hex())
 
     # 2g. Re-attach this scute's data loop and create its dm-verity dev
     # for use by the NEXT scute's read-only stack rebuild.
-    data_loop="$(attach_loop "${DATA_FILES[$i]}")"
+    data_loop="$(losetup --show -f "${DATA_FILES[$i]}")"
     DATA_LOOPS[i]="$data_loop"
-    hash_loop="$(attach_loop "${HASH_FILES[$i]}")"
+    hash_loop="$(losetup --show -f "${HASH_FILES[$i]}")"
     HASH_LOOPS[i]="$hash_loop"
 done
 
